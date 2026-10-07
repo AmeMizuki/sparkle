@@ -3,3 +3,4 @@ dist/
 *.local
 .lighthouse*
 public/samples/
+/RELEASE_NOTES.md
