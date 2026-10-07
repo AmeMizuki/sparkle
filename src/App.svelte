@@ -43,15 +43,15 @@
   import { ContextMenu } from "bits-ui";
   import Select from "$lib/components/ui/select/select.svelte";
   import Hint from "$lib/components/ui/hint/hint.svelte";
-  import { db, loadImages, importFiles, seedSamples } from "./lib/db.js";
+  import { db, loadImages, importFiles, seedSamples, deleteImages, deleteAllImages, createId } from "./lib/db.js";
+  import { lazyImage } from "./lib/lazy-image.js";
+  import { confirmationCharacter } from "./lib/confirmation.js";
   import { en, zh } from "./lib/i18n.js";
   import { matchesSearch } from "./lib/search.js";
   import { contrastText, isHex, surfaceTokens } from "./lib/color.js";
 
   let images = $state.raw([]),
-    collections = $state.raw([]),
-    thumbs = $state.raw({});
-  let originals = $state.raw({});
+    collections = $state.raw([]);
   let loading = $state(true),
     busy = $state(false),
     progress = $state({ done: 0, total: 0 });
@@ -67,7 +67,7 @@
   let compact = $state(false),
     filtersOpen = $state(false),
     mobileNav = $state(false),
-    limit = $state(60),
+    page = $state(1),
     zoom = $state(false),
     infoTab = $state("prompts");
   let fullImage = $state(null), panning = $state(false), panStart;
@@ -76,6 +76,10 @@
     formName = $state(""),
     formError = $state(""),
     chosenCollections = $state([]);
+  let deletionCode = $state(""),
+    deletionDigits = $state(["", "", "", "", "", ""]),
+    deletingAll = $state(false);
+  const deletionInput = $derived(deletionDigits.join(""));
   let status = $state(""),
     error = $state(""),
     importErrors = $state([]),
@@ -93,7 +97,6 @@
     popId = $state(null),
     persistFailed = $state(false),
     isMobile = $state(matchMedia("(max-width: 767px)").matches),
-    sentinel = $state(),
     toastTimer;
   function loadPreferences() {
     const defaults = {
@@ -253,7 +256,10 @@
       return sort === "oldest" ? order : -order;
     });
   });
-  const displayed = $derived(filtered.slice(0, limit));
+  const pageSize = 24;
+  const pageCount = $derived(Math.max(1, Math.ceil(filtered.length / pageSize)));
+  const currentPage = $derived(Math.min(page, pageCount));
+  const displayed = $derived(filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize));
   const sources = $derived([...new Set(images.map((i) => i.source))].sort());
   const totalBytes = $derived(
     images.reduce((sum, i) => sum + (i.size || 0), 0),
@@ -279,6 +285,8 @@
     modal = kind;
     formError = "";
     error = "";
+    deletionCode = "";
+    deletionDigits = ["", "", "", "", "", ""];
     formName =
       kind === "edit"
         ? selected?.name || ""
@@ -292,13 +300,19 @@
     modalOpen = false;
     restoreFocus?.focus?.();
   }
+  $effect(() => {
+    if (!modalOpen) {
+      deletionCode = "";
+      deletionDigits = ["", "", "", "", "", ""];
+    }
+  });
   function navigate(next, animate = true) {
     mobileNav = false;
     if (animate && next === view && !detailId) return;
     const update = () => {
       view = next;
       selectedId = null;
-      limit = 60;
+      page = 1;
       if (detailId) {
         detailId = null;
         location.hash = "main";
@@ -360,7 +374,7 @@
     source = "all";
     from = "";
     to = "";
-    limit = 60;
+    page = 1;
   }
   const resetFilters = () => listChange(clearFilters);
   function route(animate = true) {
@@ -379,21 +393,11 @@
   }
   async function refresh({ animate = false, before } = {}) {
     const rows = await loadImages();
-    const old = thumbs;
-    const next = Object.fromEntries(
-      rows.map((i) => [
-        i.id,
-        old[i.id] || URL.createObjectURL(i.thumbnail || i.blob),
-      ]),
-    );
     const nextCollections = await db.collections.toArray();
     const commit = () => {
       before?.();
-      thumbs = next;
       images = rows;
       collections = nextCollections;
-      for (const [id, url] of Object.entries(old))
-        if (!next[id]) URL.revokeObjectURL(url);
     };
     await (animate ? listChange(commit) : commit());
   }
@@ -489,9 +493,73 @@
       ),
     );
   }
+  function focusDeletionDigit(node, index) {
+    node.parentElement.querySelectorAll("input")[index]?.focus();
+  }
+  function typeDeletionDigit(event, index) {
+    const character = confirmationCharacter(event);
+    const node = event.currentTarget;
+    if (!character) {
+      node.value = deletionDigits[index];
+      return;
+    }
+    deletionDigits[index] = character;
+    node.value = character;
+    formError = "";
+    focusDeletionDigit(node, Math.min(5, index + 1));
+  }
+  function deletionDigitKey(event, index) {
+    const node = event.currentTarget;
+    if (event.key === "Backspace" || event.key === "Delete") {
+      event.preventDefault();
+      const target = event.key === "Backspace" && !deletionDigits[index]
+        ? Math.max(0, index - 1) : index;
+      deletionDigits[target] = "";
+      formError = "";
+      focusDeletionDigit(node, target);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      focusDeletionDigit(node, Math.max(0, Math.min(5, index + (event.key === "ArrowLeft" ? -1 : 1))));
+    }
+  }
   async function saveForm(event) {
     event.preventDefault();
+    if (!modalOpen || deletingAll) return;
+    const form = event.currentTarget;
     formError = "";
+    if (modal === "deleteAll") {
+      if (busy || loading) return;
+      deletionCode = Array.from(
+        crypto.getRandomValues(new Uint8Array(6)),
+        (byte) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[byte % 36],
+      ).join("");
+      deletionDigits = ["", "", "", "", "", ""];
+      modal = "deleteAllCode";
+      await tick();
+      form.querySelector("input")?.focus();
+      return;
+    }
+    if (modal === "deleteAllCode") {
+      if (busy || loading) return;
+      deletingAll = true;
+      try {
+        await deleteAllImages(deletionCode, deletionInput);
+        await refresh({
+          before: () => { navigate("all", false); clearFilters(); },
+        });
+        closeModal();
+        notify(t.libraryDeleted);
+      } catch (e) {
+        if (e instanceof RangeError) {
+          formError = t.deletionCodeMismatch;
+        } else imageError(e);
+      } finally {
+        deletingAll = false;
+        await tick();
+        if (formError) form.querySelector("input")?.focus();
+      }
+      return;
+    }
     if (!formName.trim() && ["edit", "collection", "manage"].includes(modal)) {
       formError = modal === "edit" ? t.nameRequired : t.collectionRequired;
       event.currentTarget.querySelector(".form-field input")?.focus();
@@ -503,7 +571,7 @@
           name: formName.trim(),
         });
       if (modal === "collection") {
-        const id = crypto.randomUUID();
+        const id = createId();
         await db.collections.add({ id, name: formName.trim() });
         collections = await db.collections.toArray();
         navigate(id);
@@ -517,7 +585,7 @@
           collectionIds: [...chosenCollections],
         });
       if (modal === "delete") {
-        await db.images.delete(selected.id);
+        await deleteImages([selected.id]);
         selectedId = null;
         if (detailId) location.hash = "";
         await refresh({ animate: true });
@@ -536,7 +604,7 @@
         });
       }
       if (modal === "samples") {
-        await db.images.bulkDelete(
+        await deleteImages(
           images.filter((i) => i.sample).map((i) => i.id),
         );
         selectedId = null;
@@ -586,25 +654,40 @@
     }
     if (event.key === "[") toggleSidebar();
   }
-  $effect(() => {
-    const image = selected;
-    if (!image) {
-      selectedUrl = "";
-      return;
+  function imageError(e) {
+    error = `${t.error} ${e.message || ""}`;
+  }
+  async function protectStorage() {
+    try {
+      protectedStorage = (await navigator.storage?.persisted?.()) ||
+        (await navigator.storage?.persist?.()) || false;
+    } catch {
+      protectedStorage = false;
     }
-    const url = URL.createObjectURL(image.blob);
-    selectedUrl = url;
+    persistFailed = !protectedStorage;
+  }
+  function changePage(next) {
+    selectedId = null;
+    page = next;
+    document.getElementById("main")?.scrollIntoView({ block: "start" });
+  }
+  $effect(() => {
+    const id = selected?.id;
+    selectedUrl = "";
     copied = "";
-    return () => URL.revokeObjectURL(url);
-  });
-  $effect(() => {
-    if (prefs.previewResolution !== "original") {
-      originals = {};
-      return;
-    }
-    const urls = Object.fromEntries(displayed.map((image) => [image.id, URL.createObjectURL(image.blob)]));
-    originals = urls;
-    return () => Object.values(urls).forEach(URL.revokeObjectURL);
+    if (!id) return;
+    let disposed = false;
+    let url;
+    db.imageBlobs.get(id).then((record) => {
+      if (disposed) return;
+      if (!(record?.blob instanceof Blob)) throw new Error("Image data not found");
+      url = URL.createObjectURL(record.blob);
+      selectedUrl = url;
+    }).catch((e) => { if (!disposed) imageError(e); });
+    return () => {
+      disposed = true;
+      if (url) URL.revokeObjectURL(url);
+    };
   });
   $effect(() => {
     selected?.id;
@@ -633,27 +716,13 @@
     to;
     view;
     sort;
-    limit = 60;
+    page = 1;
   });
   $effect(() => {
     // One staggered reveal when the library first appears, then the gallery stays still.
     if (loading) return;
     const id = setTimeout(() => (intro = false), 900);
     return () => clearTimeout(id);
-  });
-  $effect(() => {
-    // Load the next page while the sentinel is within 600px; limit/length re-arm the observer.
-    limit;
-    filtered.length;
-    if (!sentinel) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) limit += 60;
-      },
-      { rootMargin: "600px" },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
   });
   onMount(() => {
     sampleBanner = localStorage.getItem("muse-hide-samples") !== "true";
@@ -672,16 +741,15 @@
     route(false);
     window.addEventListener("hashchange", onHash);
     action(async () => {
+      await protectStorage();
       await seedSamples();
       await refresh();
-      protectedStorage = (await navigator.storage?.persisted?.()) || false;
     }).finally(() => (loading = false));
     return () => {
       dark.removeEventListener("change", onDark);
       narrow.removeEventListener("change", onNarrow);
       window.removeEventListener("hashchange", onHash);
       clearTimeout(toastTimer);
-      Object.values(thumbs).forEach(URL.revokeObjectURL);
     };
   });
 </script>
@@ -931,7 +999,7 @@
               onlostpointercapture={() => { panning = false; panStart = null; }}
             >
               <img
-                src={selectedUrl}
+                src={selectedUrl || undefined}
                 alt={selected.name}
                 draggable="false"
                 style:width={zoom ? `${selected.width}px` : undefined}
@@ -1156,13 +1224,12 @@
                       aria-label={`${image.name}: ${t.prompts}`}
                       onclick={() => openImage(image)}
                       ><img
-                        src={originals[image.id] || thumbs[image.id]}
+                        use:lazyImage={{ id: image.id, original: prefs.previewResolution === "original", onError: imageError }}
+                        style:aspect-ratio={`${image.width} / ${image.height}`}
                         alt={image.name}
                         draggable="false"
                         width={image.width}
                         height={image.height}
-                        loading={index < 12 ? "eager" : "lazy"}
-                        fetchpriority={index < 4 ? "high" : "auto"}
                         decoding="async"
                         style:view-transition-name={heroId === image.id &&
                         !selectedId
@@ -1206,16 +1273,15 @@
               {/each}
             </div>{/if}{/key}
         </div>
-        {#if !loading && filtered.length > limit}<div
-            class="sentinel"
-            bind:this={sentinel}
-            aria-hidden="true"
-          ></div>
-          <div class="load-more">
-            <Button variant="outline" onclick={() => (limit += 60)}
-              >{t.loadMore}</Button
-            ><span>{displayed.length} / {filtered.length}</span>
-          </div>{/if}
+        {#if !loading && filtered.length > pageSize}
+          <nav class="gallery-pagination" aria-label={t.pagination}>
+            <Button variant="outline" disabled={currentPage === 1} onclick={() => changePage(currentPage - 1)}
+              ><ChevronLeft size={16} />{t.previousPage}</Button>
+            <span aria-live="polite">{t.pageOf.replace("{page}", currentPage).replace("{total}", pageCount)}</span>
+            <Button variant="outline" disabled={currentPage === pageCount} onclick={() => changePage(currentPage + 1)}
+              >{t.nextPage}<ChevronRight size={16} /></Button>
+          </nav>
+        {/if}
         <footer class="gallery-footer">
           <span
             >{filtered.length}
@@ -1249,7 +1315,7 @@
       <ContextMenu.Root>
       <ContextMenu.Trigger class="inspector-preview">
         <a href={`#image/${selected.id}`} aria-label={t.fullView}
-          ><img src={prefs.previewResolution === "original" ? selectedUrl : thumbs[selected.id]} alt={selected.name} draggable="false" /></a
+          ><img use:lazyImage={{ id: selected.id, original: prefs.previewResolution === "original", onError: imageError }} alt={selected.name} width={selected.width} height={selected.height} draggable="false" /></a
         >
       </ContextMenu.Trigger>
       {@render imageMenu(selected)}
@@ -1334,7 +1400,8 @@
         onclick={() => openModal("assign")}><FolderPlus size={17} /></button
       ><a
         class="icon-button outlined"
-        href={selectedUrl}
+        href={selectedUrl || undefined}
+        aria-disabled={!selectedUrl}
         download={selected.downloadName || selected.name}
         aria-label={t.download}
         title={t.download}><Download size={17} /></a
@@ -1423,7 +1490,7 @@
       {#if selected.originalSize}
         <div class="file-details"><span>{t.originalFileSize}</span><span>{bytes(selected.originalSize)}</span></div>
       {/if}
-      <div class="file-details"><span>{t.storedFormat}</span><span>{selected.blob.type || "—"}</span></div>
+      <div class="file-details"><span>{t.storedFormat}</span><span>{selected.storedType || "—"}</span></div>
       {#if selected.warnings?.length}<div class="metadata-warning">
           <strong>{t.metadataWarning}</strong
           >{#each selected.warnings as warning}<p>{warning}</p>{/each}
@@ -1460,6 +1527,7 @@
     <button
       class="dialog-close icon-button"
       aria-label={t.close}
+      disabled={deletingAll}
       onclick={closeModal}><X size={18} /></button
     >
     <Dialog.Header
@@ -1480,6 +1548,8 @@
                       ? t.deleteCollection
                       : modal === "samples"
                         ? t.deleteSamples
+                        : ["deleteAll", "deleteAllCode"].includes(modal)
+                          ? t.deleteAllImages
                         : modal === "settings"
                           ? t.settings
                           : t.help}</Dialog.Title
@@ -1498,6 +1568,8 @@
                     ? t.deleteCollectionHint
                     : modal === "samples"
                       ? t.deleteSamplesHint
+                      : ["deleteAll", "deleteAllCode"].includes(modal)
+                        ? modal === "deleteAll" ? t.deleteAllHint : t.deleteAllCodeHint
                       : modal === "help"
                         ? t.helpBody
                         : modal === "manage"
@@ -1663,9 +1735,7 @@
           variant="outline"
           onclick={() =>
             action(async () => {
-              protectedStorage =
-                (await navigator.storage?.persist?.()) || false;
-              persistFailed = !protectedStorage;
+              await protectStorage();
               notify(protectedStorage ? t.persistent : t.persistDenied);
             })}
           ><ShieldCheck size={16} />{protectedStorage
@@ -1677,6 +1747,9 @@
             class="remove-button"
             onclick={() => openModal("samples")}>{t.deleteSamples}</button
           >{/if}
+        <Button variant="destructive" disabled={busy || loading || deletingAll || !images.length}
+          onclick={() => openModal("deleteAll")}
+          ><Trash2 size={15} />{t.deleteAllImages}</Button>
       </div>
     {:else if modal === "help"}
       <div class="shortcuts">
@@ -1703,6 +1776,49 @@
       </p>
     {:else}
       <form onsubmit={saveForm}>
+        {#if modal === "deleteAllCode"}
+          <div class="deletion-confirmation">
+            <div class="deletion-challenge" role="group"
+              aria-label={`${t.deletionCode}: ${deletionCode.split("").join(" ")}`}
+              oncopy={(event) => event.preventDefault()}
+              oncut={(event) => event.preventDefault()}
+              ondragstart={(event) => event.preventDefault()}>
+              <div class="deletion-challenge-label">
+                <ShieldCheck size={16} strokeWidth={1.5} aria-hidden="true" />
+                <span>{t.deletionCode}</span>
+              </div>
+              <div class="deletion-code" aria-hidden="true">
+                {#each deletionCode.split("") as character, index}
+                  <span>{character}</span>
+                {/each}
+              </div>
+            </div>
+            <fieldset class="deletion-otp" disabled={deletingAll}
+              onpaste={(event) => event.preventDefault()}
+              oncopy={(event) => event.preventDefault()}
+              oncut={(event) => event.preventDefault()}
+              ondrop={(event) => event.preventDefault()}
+              ondragover={(event) => event.preventDefault()}>
+              <legend>{t.enterDeletionCode}</legend>
+              <div class="otp-slots">
+                {#each deletionDigits as digit, index}
+                  <input name={`deletion-code-${index}`} value={digit} maxlength="1"
+                    aria-label={`${t.enterDeletionCode} ${index + 1} / 6`}
+                    autocomplete="off" autocapitalize="characters" spellcheck="false"
+                    inputmode="text" data-filled={!!digit}
+                    aria-invalid={!!formError}
+                    aria-describedby={formError ? "deletion-code-error" : "deletion-input-hint"}
+                    onfocus={(event) => event.currentTarget.select()}
+                    onbeforeinput={(event) => { if (!confirmationCharacter(event)) event.preventDefault(); }}
+                    oninput={(event) => typeDeletionDigit(event, index)}
+                    onkeydown={(event) => deletionDigitKey(event, index)} />
+                {/each}
+              </div>
+              <p id="deletion-input-hint" class="deletion-input-hint">{t.manualCodeHint}</p>
+            </fieldset>
+          </div>
+          {#if formError}<p id="deletion-code-error" class="form-error" role="alert">{formError}</p>{/if}
+        {/if}
         {#if ["edit", "collection", "manage"].includes(modal)}<label
             class="form-field"
             >{modal === "edit" ? t.name : t.collectionName}<input
@@ -1732,11 +1848,12 @@
               variant="destructive"
               onclick={() => openModal("deleteCollection")}
               ><Trash2 size={15} />{t.deleteCollection}</Button
-            >{/if}<Button variant="outline" onclick={closeModal}
+            >{/if}<Button variant="outline" disabled={deletingAll} onclick={closeModal}
             >{t.cancel}</Button
           ><Button
             type="submit"
-            variant={["delete", "deleteCollection", "samples"].includes(modal)
+            disabled={deletingAll || (["deleteAll", "deleteAllCode"].includes(modal) && (busy || loading)) || (modal === "deleteAllCode" && deletionInput.length !== 6)}
+            variant={["delete", "deleteCollection", "samples", "deleteAll", "deleteAllCode"].includes(modal)
               ? "destructive"
               : "default"}
             >{modal === "collection"
@@ -1747,6 +1864,10 @@
                   ? t.deleteCollection
                   : modal === "samples"
                     ? t.confirmRemove
+                    : modal === "deleteAll"
+                      ? t.confirmDeleteAll
+                      : modal === "deleteAllCode"
+                        ? t.deleteAllImages
                     : t.save}</Button
           >
         </div>

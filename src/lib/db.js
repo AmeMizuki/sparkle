@@ -7,6 +7,50 @@ db.version(1).stores({
   settings: "&key",
 });
 
+db.version(2).stores({
+  images: "&id,date,importedAt,source,*collectionIds",
+  imageBlobs: "&id",
+}).upgrade(async (tx) => {
+  const images = tx.table("images");
+  for (const id of await images.toCollection().primaryKeys()) {
+    const { blob, thumbnail, ...metadata } = await images.get(id);
+    await tx.table("imageBlobs").add({ id, blob, thumbnail });
+    await images.put({ ...metadata, storedType: blob.type });
+  }
+});
+
+export function createId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function addImage({ blob, thumbnail, ...metadata }) {
+  await db.transaction("rw", db.images, db.imageBlobs, async () => {
+    await db.images.add({ ...metadata, storedType: blob.type });
+    await db.imageBlobs.add({ id: metadata.id, blob, thumbnail });
+  });
+}
+
+export async function deleteImages(ids) {
+  await db.transaction("rw", db.images, db.imageBlobs, async () => {
+    await db.images.bulkDelete(ids);
+    await db.imageBlobs.bulkDelete(ids);
+  });
+}
+
+export async function deleteAllImages(code, input) {
+  if (typeof code !== "string" || !/^[A-Z0-9]{6}$/.test(code) || input !== code)
+    throw new RangeError("Confirmation code does not match");
+  await db.transaction("rw", db.images, db.imageBlobs, async () => {
+    await db.images.clear();
+    await db.imageBlobs.clear();
+  });
+}
+
 export const loadImages = () => db.images.orderBy("date").reverse().toArray();
 
 async function decodeImage(blob) {
@@ -124,8 +168,8 @@ export async function importFiles(files, onProgress = () => {}) {
       const modified = Number.isFinite(file.lastModified)
         ? file.lastModified
         : Date.now();
-      await db.images.add({
-        id: crypto.randomUUID(),
+      await addImage({
+        id: createId(),
         name: originalName,
         ...dimensions,
         size: dimensions.blob.size,
@@ -197,7 +241,7 @@ export async function seedSamples() {
     const dimensions = await imageData(blob);
     const thumbnailPath = sample.thumbnailFile || sample.thumbnailUrl;
     records.push({
-      id: sample.id || crypto.randomUUID(),
+      id: sample.id || createId(),
       name: sample.name || (sample.file || sample.url).split("/").pop(),
       blob,
       ...dimensions,
@@ -224,13 +268,14 @@ export async function seedSamples() {
   await db.transaction(
     "rw",
     db.images,
+    db.imageBlobs,
     db.collections,
     db.settings,
     async () => {
       // Recheck after fetching: a concurrent import/tab must never be overwritten or reseeded.
       if (await db.settings.get(settingKey)) return;
       if (!(await db.images.count())) {
-        await db.images.bulkAdd(records);
+        for (const record of records) await addImage(record);
         await db.collections.bulkPut([
           { id: "landscape", name: "Landscape studies" },
           { id: "artists", name: "Artist blends" },

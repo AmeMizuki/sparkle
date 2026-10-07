@@ -47,6 +47,7 @@
   --dur-micro: 120ms;
   --dur-short: 220ms;
   --dur-long: 420ms;
+  --font-code: ui-monospace, "Cascadia Code", Consolas, monospace;
   font-family: "Geist Variable", "Segoe UI", sans-serif;
   color: var(--foreground);
   background: var(--background);
@@ -799,7 +800,7 @@ kbd {
   font-size: 10px;
   color: var(--muted-foreground);
 }
-.load-more {
+.gallery-pagination {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1430,6 +1431,99 @@ kbd {
 .form-actions button {
   font-size: 12px;
 }
+
+.deletion-confirmation {
+  padding-top: 8px;
+}
+.deletion-challenge {
+  padding: 20px;
+  margin-bottom: 28px;
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--primary) 8%, var(--popover));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 16%, transparent);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.deletion-challenge-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+.deletion-code,
+.otp-slots {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+.deletion-code {
+  margin-top: 16px;
+}
+.deletion-code span {
+  display: grid;
+  place-items: center;
+  height: 48px;
+  border-radius: 8px;
+  background: var(--popover);
+  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--foreground) 6%, transparent);
+  color: var(--foreground);
+  font-family: var(--font-code);
+  font-size: clamp(18px, 4vw, 26px);
+  font-weight: 600;
+}
+.deletion-otp {
+  min-width: 0;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+.deletion-otp legend {
+  margin-bottom: 12px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+.otp-slots input {
+  width: 100%;
+  min-width: 0;
+  height: 52px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--background);
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--foreground);
+  font-family: var(--font-code);
+  font-size: 24px;
+  font-weight: 500;
+  text-align: center;
+  caret-color: var(--primary);
+}
+.otp-slots input:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, var(--border));
+}
+.otp-slots input[data-filled="true"] {
+  background: color-mix(in oklab, var(--primary) 6%, var(--background));
+}
+.otp-slots input:focus-visible {
+  outline: 2px solid var(--ring-color);
+  outline-offset: 2px;
+}
+.otp-slots input[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1px var(--destructive);
+}
+.otp-slots input:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.deletion-input-hint {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+}
 .collection-choices {
   display: flex;
   flex-direction: column;
@@ -1960,7 +2054,7 @@ kbd {
   accent-color: var(--primary);
 }
 
-/* ---------- Detail pager, infinite-scroll sentinel ---------- */
+/* ---------- Detail pager ---------- */
 .pager {
   display: flex;
   align-items: center;
@@ -1972,9 +2066,6 @@ kbd {
   font-size: 12px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
-}
-.sentinel {
-  height: 1px;
 }
 
 /* ---------- Toast (success feedback; errors stay in banners) ---------- */
