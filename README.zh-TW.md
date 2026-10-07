@@ -3,12 +3,17 @@
 </p>
 
 <p align="center">
-  私人、離線優先的圖片與 AI 提示詞管理工具。
+  <a href="README.zh-TW.md">繁體中文</a> ·
+  <a href="README.md">English</a>
 </p>
 
 <p align="center">
-  <img src="https://i.urusai.cc/hfixF.jpg" alt="Sparkle 網站預覽" width="100%">
+  私人、離線優先的圖片與 AI 提示詞管理工具。
 </p>
+
+<a href="https://github.com/AmeMizuki/sparkle/releases/download/readme-assets/preview-dashboard.mp4">
+  <img src="https://github.com/AmeMizuki/sparkle/releases/download/readme-assets/preview-1.webp" alt="Sparkle Preview" width="100%">
+</a>
 
 ## ✨ 功能特色
 
