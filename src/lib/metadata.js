@@ -538,31 +538,6 @@ export function normalizeMetadata(raw = {}, warnings = []) {
     typeof normalized.positive === "string" ? normalized.positive : "";
   normalized.negative =
     typeof normalized.negative === "string" ? normalized.negative : "";
-  const artistEntries = [
-    ...entries,
-    ...documents.flatMap(([, doc]) =>
-      Object.entries(doc.sui_image_params || doc),
-    ),
-  ];
-  const explicitArtist = artistEntries.find(
-    ([name, value]) =>
-      ["artist", "creator", "author"].includes(key(name)) &&
-      (typeof value === "string" ||
-        (Array.isArray(value) && value.every((v) => typeof v === "string"))),
-  )?.[1];
-  const taggedArtists = [
-    ...normalized.positive.matchAll(/(?:^|[,\n(])\s*artist\s*:\s*([^,\n)]+)/gi),
-  ].map((match) => match[1].trim());
-  const byArtists = [
-    ...normalized.positive.matchAll(
-      /\bby\s+([^,\n;()]+?)(?=\s+(?:and\s+by|with|in the|style|rendered)\b|[,\n;()]|$)/gi,
-    ),
-  ].map((match) => match[1].trim());
-  const artist = explicitArtist
-    ? Array.isArray(explicitArtist)
-      ? explicitArtist.join(", ")
-      : explicitArtist
-    : [...new Set([...taggedArtists, ...byArtists])].join(", ");
   for (const [name, value] of entries) {
     if (
       ["prompt", "comment", "usercomment", "swarmprompt"].includes(key(name)) &&
@@ -572,7 +547,7 @@ export function normalizeMetadata(raw = {}, warnings = []) {
     )
       warnings.push(`Malformed ${name} JSON metadata`);
   }
-  return { ...normalized, artist, raw, warnings: [...new Set(warnings)] };
+  return { ...normalized, raw, warnings: [...new Set(warnings)] };
 }
 
 export async function extractMetadata(blob) {
@@ -605,7 +580,6 @@ export async function extractMetadata(blob) {
   } catch (error) {
     return {
       source: "Unknown",
-      artist: "",
       positive: "",
       negative: "",
       parameters: {},

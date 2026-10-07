@@ -2,7 +2,6 @@
   import { onMount, tick } from "svelte";
   import { fly } from "svelte/transition";
   import {
-    Aperture,
     Images,
     Heart,
     Clock3,
@@ -41,6 +40,9 @@
   } from "@lucide/svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
+  import { ContextMenu } from "bits-ui";
+  import Select from "$lib/components/ui/select/select.svelte";
+  import Hint from "$lib/components/ui/hint/hint.svelte";
   import { db, loadImages, importFiles, seedSamples } from "./lib/db.js";
   import { en, zh } from "./lib/i18n.js";
   import { matchesSearch } from "./lib/search.js";
@@ -49,6 +51,7 @@
   let images = $state.raw([]),
     collections = $state.raw([]),
     thumbs = $state.raw({});
+  let originals = $state.raw({});
   let loading = $state(true),
     busy = $state(false),
     progress = $state({ done: 0, total: 0 });
@@ -67,10 +70,10 @@
     limit = $state(60),
     zoom = $state(false),
     infoTab = $state("prompts");
+  let fullImage = $state(null), panning = $state(false), panStart;
   let modalOpen = $state(false),
     modal = $state(""),
     formName = $state(""),
-    formArtist = $state(""),
     formError = $state(""),
     chosenCollections = $state([]);
   let status = $state(""),
@@ -84,6 +87,9 @@
     restoreFocus;
   let heroId = $state(null),
     intro = $state(true),
+    cardNames = $state(false),
+    queryText = $state(""),
+    introTimer,
     popId = $state(null),
     persistFailed = $state(false),
     isMobile = $state(matchMedia("(max-width: 767px)").matches),
@@ -96,6 +102,7 @@
       accent: "#46765b",
       bg: "neutral",
       tint: 50,
+      previewResolution: "normal",
     };
     try {
       const saved = JSON.parse(
@@ -114,6 +121,7 @@
         tint: Number.isFinite(saved.tint)
           ? Math.min(100, Math.max(0, saved.tint))
           : defaults.tint,
+        previewResolution: saved.previewResolution === "original" ? "original" : "normal",
         // Small screens start with the rail; the user's choice wins afterwards.
         collapsed:
           typeof saved.collapsed === "boolean"
@@ -164,10 +172,11 @@
    * Runs a state change inside a View Transition (page cross-fade, plus a shared-image morph when
    * `hero` names the image involved). Falls back to a plain update without support or under reduced motion.
    */
-  async function morph(update, hero = null) {
+  async function morph(update, hero = null, cards = false) {
     if (!document.startViewTransition || reduced.matches) return void update();
-    if (hero) {
+    if (hero || cards) {
       heroId = hero;
+      cardNames = cards;
       await tick();
     }
     const transition = document.startViewTransition(async () => {
@@ -180,8 +189,19 @@
       // A newer transition replaced this one; its own state change already ran.
     } finally {
       heroId = null;
+      cardNames = false;
     }
   }
+  // List changes (sort, filter, add, remove) glide each card to its new place instead of snapping.
+  const listChange = (update) => morph(update, null, true);
+  $effect(() => {
+    const text = queryText;
+    const id = setTimeout(
+      () => text !== query && listChange(() => (query = text)),
+      160,
+    );
+    return () => clearTimeout(id);
+  });
   function notify(message) {
     status = message;
     clearTimeout(toastTimer);
@@ -224,15 +244,14 @@
         (!to || i.date.slice(0, 10) <= to) &&
         matchesSearch(i, query),
     );
-    return result.sort((a, b) =>
-      sort === "name"
-        ? a.name.localeCompare(b.name)
-        : sort === "oldest"
-          ? a.date.localeCompare(b.date)
-          : view === "recent"
-            ? b.importedAt.localeCompare(a.importedAt)
-            : b.date.localeCompare(a.date),
-    );
+    const byName = (a, b) => a.name.localeCompare(b.name, prefs.lang, { numeric: true });
+    return result.sort((a, b) => {
+      if (sort === "name") return byName(a, b) || a.id.localeCompare(b.id);
+      const dateKey = view === "recent" ? "importedAt" : "date";
+      const order = (a[dateKey] || a.date).localeCompare(b[dateKey] || b.date) ||
+        a.importedAt.localeCompare(b.importedAt) || byName(a, b) || a.id.localeCompare(b.id);
+      return sort === "oldest" ? order : -order;
+    });
   });
   const displayed = $derived(filtered.slice(0, limit));
   const sources = $derived([...new Set(images.map((i) => i.source))].sort());
@@ -266,7 +285,6 @@
         : kind === "manage"
           ? activeCollection?.name || ""
           : "";
-    formArtist = selected?.artist || "";
     chosenCollections = [...(selected?.collectionIds || [])];
     modalOpen = true;
   }
@@ -274,15 +292,24 @@
     modalOpen = false;
     restoreFocus?.focus?.();
   }
-  function navigate(next) {
-    view = next;
-    selectedId = null;
+  function navigate(next, animate = true) {
     mobileNav = false;
-    limit = 60;
-    if (detailId) {
-      detailId = null;
-      location.hash = "main";
-    }
+    if (animate && next === view && !detailId) return;
+    const update = () => {
+      view = next;
+      selectedId = null;
+      limit = 60;
+      if (detailId) {
+        detailId = null;
+        location.hash = "main";
+      }
+      // A fresh staggered reveal makes the switch read as a new page, not a silent swap.
+      intro = true;
+      clearTimeout(introTimer);
+      introTimer = setTimeout(() => (intro = false), 900);
+    };
+    if (animate) morph(update);
+    else update();
   }
   function openImage(image) {
     infoTab = "prompts";
@@ -292,13 +319,50 @@
     }
     selectedId = image.id;
   }
-  function resetFilters() {
+  function imageModal(image, kind) {
+    if (!detailId) selectedId = image.id;
+    openModal(kind);
+  }
+  async function toggleCollection(image, id) {
+    const ids = image.collectionIds || [];
+    await action(() => patch(image, {
+      collectionIds: ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
+    }));
+  }
+  function startPan(event) {
+    if (!zoom || event.button !== 0) return;
+    event.preventDefault();
+    const element = event.currentTarget;
+    element.setPointerCapture(event.pointerId);
+    panStart = { x: event.clientX, y: event.clientY, left: element.scrollLeft, top: element.scrollTop };
+    panning = true;
+  }
+  function pan(event) {
+    if (!panning) return;
+    event.currentTarget.scrollLeft = panStart.left + panStart.x - event.clientX;
+    event.currentTarget.scrollTop = panStart.top + panStart.y - event.clientY;
+  }
+  function endPan(event) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    panning = false;
+    panStart = null;
+  }
+  function dragOver(event) {
+    event.preventDefault();
+    dragging = !busy && event.dataTransfer.types.includes("Files") &&
+      !event.dataTransfer.types.includes("text/uri-list");
+    event.dataTransfer.dropEffect = dragging ? "copy" : "none";
+  }
+  function clearFilters() {
     query = "";
+    queryText = "";
     source = "all";
     from = "";
     to = "";
     limit = 60;
   }
+  const resetFilters = () => listChange(clearFilters);
   function route(animate = true) {
     const match = location.hash.match(/^#image\/(.+)$/);
     const next = match ? decodeURIComponent(match[1]) : null;
@@ -313,19 +377,25 @@
     if (animate && (!prev || !next)) morph(update, next);
     else update();
   }
-  async function refresh() {
+  async function refresh({ animate = false, before } = {}) {
     const rows = await loadImages();
     const old = thumbs;
-    thumbs = Object.fromEntries(
+    const next = Object.fromEntries(
       rows.map((i) => [
         i.id,
         old[i.id] || URL.createObjectURL(i.thumbnail || i.blob),
       ]),
     );
-    for (const [id, url] of Object.entries(old))
-      if (!thumbs[id]) URL.revokeObjectURL(url);
-    images = rows;
-    collections = await db.collections.toArray();
+    const nextCollections = await db.collections.toArray();
+    const commit = () => {
+      before?.();
+      thumbs = next;
+      images = rows;
+      collections = nextCollections;
+      for (const [id, url] of Object.entries(old))
+        if (!next[id]) URL.revokeObjectURL(url);
+    };
+    await (animate ? listChange(commit) : commit());
   }
   async function action(fn) {
     error = "";
@@ -337,7 +407,17 @@
   }
   async function patch(image, changes) {
     await db.images.update(image.id, changes);
-    images = images.map((i) => (i.id === image.id ? { ...i, ...changes } : i));
+    const apply = () =>
+      (images = images.map((i) =>
+        i.id === image.id ? { ...i, ...changes } : i,
+      ));
+    const leavesView =
+      (view === "favorites" && changes.favorite === false) ||
+      (activeCollection &&
+        changes.collectionIds &&
+        !changes.collectionIds.includes(view));
+    if (leavesView) await listChange(apply);
+    else apply();
   }
   async function toggleFavorite(image) {
     popId = image.id;
@@ -362,9 +442,13 @@
           ? t.importOneSuccess
           : t.importSuccess.replace("{count}", result.imported),
       );
-      navigate("all");
-      resetFilters();
-      await refresh();
+      await refresh({
+        animate: true,
+        before: () => {
+          navigate("all", false);
+          clearFilters();
+        },
+      });
     } catch (e) {
       error = `${t.error} ${e.message || ""}`;
     } finally {
@@ -376,6 +460,8 @@
   async function dropped(event) {
     event.preventDefault();
     dragging = false;
+    if (busy || !event.dataTransfer.types.includes("Files") ||
+      event.dataTransfer.types.includes("text/uri-list")) return;
     const entries = [...event.dataTransfer.items]
       .map((item) => item.webkitGetAsEntry?.())
       .filter(Boolean);
@@ -415,7 +501,6 @@
       if (modal === "edit")
         await patch(selected, {
           name: formName.trim(),
-          artist: formArtist.trim(),
         });
       if (modal === "collection") {
         const id = crypto.randomUUID();
@@ -430,13 +515,12 @@
       if (modal === "assign")
         await patch(selected, {
           collectionIds: [...chosenCollections],
-          favorite: true,
         });
       if (modal === "delete") {
         await db.images.delete(selected.id);
         selectedId = null;
         if (detailId) location.hash = "";
-        await refresh();
+        await refresh({ animate: true });
       }
       if (modal === "deleteCollection") {
         await db.transaction("rw", db.images, db.collections, async () => {
@@ -446,8 +530,10 @@
             });
           await db.collections.delete(view);
         });
-        navigate("all");
-        await refresh();
+        await refresh({
+          animate: true,
+          before: () => navigate("all", false),
+        });
       }
       if (modal === "samples") {
         await db.images.bulkDelete(
@@ -455,7 +541,7 @@
         );
         selectedId = null;
         if (selected?.sample) location.hash = "";
-        await refresh();
+        await refresh({ animate: true });
       }
       closeModal();
     });
@@ -476,6 +562,7 @@
     }
   }
   function keydown(event) {
+    if (document.querySelector('[data-context-menu-content]')) return;
     if (
       event.key === "Escape" &&
       !modalOpen &&
@@ -511,6 +598,22 @@
     return () => URL.revokeObjectURL(url);
   });
   $effect(() => {
+    if (prefs.previewResolution !== "original") {
+      originals = {};
+      return;
+    }
+    const urls = Object.fromEntries(displayed.map((image) => [image.id, URL.createObjectURL(image.blob)]));
+    originals = urls;
+    return () => Object.values(urls).forEach(URL.revokeObjectURL);
+  });
+  $effect(() => {
+    selected?.id;
+    zoom;
+    panning = false;
+    panStart = null;
+    fullImage?.scrollTo(0, 0);
+  });
+  $effect(() => {
     const root = document.documentElement;
     root.classList.toggle("dark", isDark);
     root.lang = prefs.lang;
@@ -529,6 +632,7 @@
     from;
     to;
     view;
+    sort;
     limit = 60;
   });
   $effect(() => {
@@ -582,7 +686,10 @@
   });
 </script>
 
-<svelte:window onkeydown={keydown} />
+<svelte:window onkeydown={keydown} ondragstart={(event) => {
+  if (event.target.closest?.(".app-shell") && event.target.closest?.("img,a"))
+    event.preventDefault();
+}} />
 <svelte:head
   ><title
     >{selected && detailId
@@ -789,7 +896,12 @@
                     onclick={() => move(1)}><ChevronRight size={19} /></button
                   >
                 </div>{/if}
-              <Button variant="outline" onclick={() => (zoom = !zoom)}
+              <Button
+                variant="outline"
+                onclick={() => {
+                  zoom = !zoom;
+                  if (zoom) notify(t.panHint);
+                }}
                 >{#if zoom}<ZoomOut size={16} />{t.fit}{:else}<ZoomIn
                     size={16}
                   />{t.zoom}{/if}</Button
@@ -805,14 +917,29 @@
             </div>
           </div>
           <div class="detail-layout">
-            <div class="full-image" class:zoomed={zoom}>
+            <ContextMenu.Root>
+            <ContextMenu.Trigger
+              class={`full-image${zoom ? " zoomed" : ""}${panning ? " panning" : ""}`}
+              bind:ref={fullImage}
+              role="region"
+              tabindex="0"
+              aria-label={`${selected.name}: ${t.panHint}`}
+              onpointerdown={startPan}
+              onpointermove={pan}
+              onpointerup={endPan}
+              onpointercancel={endPan}
+              onlostpointercapture={() => { panning = false; panStart = null; }}
+            >
               <img
                 src={selectedUrl}
                 alt={selected.name}
+                draggable="false"
                 style:width={zoom ? `${selected.width}px` : undefined}
                 style:max-width={zoom ? "none" : undefined}
               />
-            </div>
+            </ContextMenu.Trigger>
+            {@render imageMenu(selected)}
+            </ContextMenu.Root>
             <aside class="detail-info">
               {#key selected.id}<div class="info-swap">
                   {@render imageInfo(true)}
@@ -827,7 +954,7 @@
           </div>{/if}
       {:else}
         <section class="page-heading">
-          <div>
+          {#key view}<div>
             <div class="page-title-row">
               <h1>{title}</h1>
               <span class="total-badge"
@@ -843,7 +970,7 @@
                     ? t.collectionHint
                     : t.title}
             </p>
-          </div>
+          </div>{/key}
           <div class="heading-actions">
             {#if activeCollection}<button
                 class="icon-button outlined"
@@ -863,12 +990,12 @@
               >{t.search}</span
             ><input
               bind:this={searchInput}
-              bind:value={query}
+              bind:value={queryText}
               placeholder={t.searchPlaceholder}
-            />{#if query}<button
+            />{#if queryText}<button
                 class="small-icon"
                 aria-label={t.clear}
-                onclick={() => (query = "")}><X size={15} /></button
+                onclick={() => (queryText = "")}><X size={15} /></button
               >{:else}<kbd>/</kbd>{/if}</label
           >
           <div class="toolbar-controls">
@@ -883,27 +1010,29 @@
                     Number(!!from) +
                     Number(!!to)}</span
                 >{/if}</button
-            ><label class="sort-field"
-              ><span class="sr-only"
-                >{prefs.lang === "en" ? "Sort images" : "圖片排序"}</span
-              ><select bind:value={sort}
-                ><option value="newest">{t.newest}</option><option
-                  value="oldest">{t.oldest}</option
-                ><option value="name">{t.nameSort}</option></select
-              ><ChevronDown size={14} /></label
-            >
+            ><Select
+              class="select-quiet"
+              label={prefs.lang === "en" ? "Sort images" : "圖片排序"}
+              value={sort}
+              options={[
+                { value: "newest", label: t.newest },
+                { value: "oldest", label: t.oldest },
+                { value: "name", label: t.nameSort },
+              ]}
+              onchange={(next) => listChange(() => (sort = next))}
+            />
             <div class="view-toggle">
               <button
                 class:chosen={!compact}
                 aria-label={t.grid}
                 aria-pressed={!compact}
-                onclick={() => (compact = false)}
+                onclick={() => listChange(() => (compact = false))}
                 ><LayoutGrid size={17} /></button
               ><button
                 class:chosen={compact}
                 aria-label={t.list}
                 aria-pressed={compact}
-                onclick={() => (compact = true)}><List size={18} /></button
+                onclick={() => listChange(() => (compact = true))}><List size={18} /></button
               >
             </div>
           </div>
@@ -912,17 +1041,31 @@
             class="filter-panel"
             in:fly={{ y: -6, duration: motion(180) }}
           >
+            <div class="field">
+              <span>{t.source}</span><Select
+                label={t.source}
+                value={source}
+                options={[
+                  { value: "all", label: t.allTools },
+                  ...sources.map((s) => ({ value: s, label: s })),
+                ]}
+                onchange={(next) => listChange(() => (source = next))}
+              />
+            </div>
             <label
-              >{t.source}<select bind:value={source}
-                ><option value="all">{t.allTools}</option
-                >{#each sources as s}<option value={s}>{s}</option
-                  >{/each}</select
-              ></label
-            ><label>{t.from}<input type="date" bind:value={from} /></label
-            ><label>{t.to}<input type="date" bind:value={to} /></label><Button
-              variant="ghost"
-              onclick={resetFilters}>{t.reset}</Button
-            >
+              >{t.from}<input
+                type="date"
+                value={from}
+                onchange={(e) =>
+                  listChange(() => (from = e.currentTarget.value))}
+              /></label
+            ><label
+              >{t.to}<input
+                type="date"
+                value={to}
+                onchange={(e) => listChange(() => (to = e.currentTarget.value))}
+              /></label
+            ><Button variant="ghost" onclick={resetFilters}>{t.reset}</Button>
           </div>{/if}
         {#if sampleBanner && images.some((i) => i.sample) && view === "all" && !hasFilters}<div
             class="sample-banner"
@@ -945,10 +1088,7 @@
           </div>{/if}
         <div
           class="gallery-region"
-          ondragover={(e) => {
-            e.preventDefault();
-            dragging = true;
-          }}
+          ondragover={dragOver}
           ondragleave={(e) => {
             if (!e.currentTarget.contains(e.relatedTarget)) dragging = false;
           }}
@@ -959,7 +1099,7 @@
           {#if dragging}<div class="drop-overlay">
               <Upload size={34} /><strong>{t.drop}</strong>
             </div>{/if}
-          {#if loading}<div
+          {#key view}{#if loading}<div
               class="gallery skeleton-gallery"
               aria-label={t.loading}
             >
@@ -999,10 +1139,16 @@
             </div>
           {:else}<div class="gallery" class:compact class:intro>
               {#each displayed as image, index (image.id)}
-                <article
+                <ContextMenu.Root>
+                <ContextMenu.Trigger>
+                {#snippet child({ props })}
+                <article {...props}
                   class="image-card"
                   class:selected={selectedId === image.id}
                   style:--i={index}
+                  style:view-transition-name={cardNames
+                    ? `c-${image.id}`
+                    : undefined}
                 >
                   <div class="image-frame">
                     <button
@@ -1010,8 +1156,9 @@
                       aria-label={`${image.name}: ${t.prompts}`}
                       onclick={() => openImage(image)}
                       ><img
-                        src={thumbs[image.id]}
+                        src={originals[image.id] || thumbs[image.id]}
                         alt={image.name}
+                        draggable="false"
                         width={image.width}
                         height={image.height}
                         loading={index < 12 ? "eager" : "lazy"}
@@ -1045,19 +1192,19 @@
                       onclick={() => openImage(image)}>{image.name}</button
                     >
                     <div class="card-meta">
-                      <span
-                        class="artist-label"
-                        title={image.artist || t.unknownArtist}
-                        >{image.artist || t.unknownArtist}</span
-                      ><span class="source-tag">{image.source}</span>
+                      <span class="source-tag">{image.source}</span>
                     </div>
                     {#if compact}<time datetime={image.date}
                         >{dateLabel(image.date)}</time
                       >{/if}
                   </div>
                 </article>
+                {/snippet}
+                </ContextMenu.Trigger>
+                {@render imageMenu(image)}
+                </ContextMenu.Root>
               {/each}
-            </div>{/if}
+            </div>{/if}{/key}
         </div>
         {#if !loading && filtered.length > limit}<div
             class="sentinel"
@@ -1099,11 +1246,14 @@
           >
         </div>
       </div>
-      <div class="inspector-preview">
+      <ContextMenu.Root>
+      <ContextMenu.Trigger class="inspector-preview">
         <a href={`#image/${selected.id}`} aria-label={t.fullView}
-          ><img src={selectedUrl} alt={selected.name} /></a
+          ><img src={prefs.previewResolution === "original" ? selectedUrl : thumbs[selected.id]} alt={selected.name} draggable="false" /></a
         >
-      </div>
+      </ContextMenu.Trigger>
+      {@render imageMenu(selected)}
+      </ContextMenu.Root>
       <div class="inspector-content">
         {#key selected.id}<div class="info-swap">
             {@render imageInfo(false)}
@@ -1119,6 +1269,39 @@
   {/if}
 </div>
 
+{#snippet imageMenu(image)}
+  <ContextMenu.Portal>
+    <ContextMenu.Content class="image-context-menu">
+      <ContextMenu.Item onSelect={() => (location.hash = `image/${image.id}`)}>
+        <ArrowUpRight size={16} />{t.fullView}
+      </ContextMenu.Item>
+      <ContextMenu.Item onSelect={() => toggleFavorite(image)}>
+        <Heart size={16} fill={image.favorite ? "currentColor" : "none"} />
+        {image.favorite ? t.unfavorite : t.favorite}
+      </ContextMenu.Item>
+      <ContextMenu.Sub>
+        <ContextMenu.SubTrigger><FolderPlus size={16} />{t.assign}<ChevronRight size={14} /></ContextMenu.SubTrigger>
+        <ContextMenu.Portal>
+          <ContextMenu.SubContent class="image-context-menu">
+            {#each collections as collection}
+              <ContextMenu.Item onSelect={() => toggleCollection(image, collection.id)}>
+                <Folder size={16} /><span>{collection.name}</span>
+                {#if image.collectionIds?.includes(collection.id)}<Check size={14} />{/if}
+              </ContextMenu.Item>
+            {/each}
+            <ContextMenu.Item onSelect={() => imageModal(image, "assign")}>
+              <SlidersHorizontal size={16} />{t.organize}
+            </ContextMenu.Item>
+          </ContextMenu.SubContent>
+        </ContextMenu.Portal>
+      </ContextMenu.Sub>
+      <ContextMenu.Separator />
+      <ContextMenu.Item onSelect={() => imageModal(image, "edit")}><Pencil size={16} />{t.rename}</ContextMenu.Item>
+      <ContextMenu.Item class="destructive" onSelect={() => imageModal(image, "delete")}><Trash2 size={16} />{t.remove}</ContextMenu.Item>
+    </ContextMenu.Content>
+  </ContextMenu.Portal>
+{/snippet}
+
 {#snippet imageInfo(full)}
   {#if selected}
     <div class="info-title">
@@ -1133,9 +1316,6 @@
         onclick={() => openModal("edit")}><Pencil size={16} /></button
       >
     </div>
-    <p class="info-artist">
-      <Aperture size={15} />{selected.artist || t.unknownArtist}
-    </p>
     <div class="info-meta-strip">
       <span class="source-tag">{selected.source}</span><span
         >{selected.width} × {selected.height}</span
@@ -1155,13 +1335,16 @@
       ><a
         class="icon-button outlined"
         href={selectedUrl}
-        download={selected.name}
+        download={selected.downloadName || selected.name}
         aria-label={t.download}
         title={t.download}><Download size={17} /></a
       >
     </div>
     {#if selected.sample}<div class="sample-disclaimer">
-        <Sparkles size={14} /><span>{t.sampleInfo}</span>
+        <Sparkles size={14} /><span>{t.sample}</span><Hint
+          text={t.sampleInfo}
+          label={t.moreInfo}
+        />
       </div>{/if}
     {#if !full}<div class="info-tabs">
         <button
@@ -1172,6 +1355,26 @@
           onclick={() => (infoTab = "details")}>{t.details}</button
         >
       </div>{/if}
+    {#key full ? "full" : infoTab}<div class="tab-swap">
+    {#if full || infoTab === "details"}
+      <div class="preview-resolution">
+        <span class="row-with-hint"
+          >{t.previewResolution}<Hint
+            text={t.previewHint}
+            label={t.moreInfo}
+          /></span
+        >
+        <Select
+          label={t.previewResolution}
+          value={prefs.previewResolution}
+          options={[
+            { value: "normal", label: t.previewNormal },
+            { value: "original", label: t.previewOriginal },
+          ]}
+          onchange={(next) => (prefs.previewResolution = next)}
+        />
+      </div>
+    {/if}
     {#if full || infoTab === "prompts"}
       {#each [{ key: "positive", label: t.positive, value: selected.positive, empty: t.noPrompt }, { key: "negative", label: t.negative, value: selected.negative, empty: t.noNegative }] as prompt}
         <section class="prompt-section">
@@ -1215,6 +1418,12 @@
           >{dateLabel(selected.date)}</time
         >
       </div>
+      <div class="file-details"><span>{t.dimensions}</span><span>{selected.width} × {selected.height}</span></div>
+      <div class="file-details"><span>{t.fileSize}</span><span>{bytes(selected.size)}</span></div>
+      {#if selected.originalSize}
+        <div class="file-details"><span>{t.originalFileSize}</span><span>{bytes(selected.originalSize)}</span></div>
+      {/if}
+      <div class="file-details"><span>{t.storedFormat}</span><span>{selected.blob.type || "—"}</span></div>
       {#if selected.warnings?.length}<div class="metadata-warning">
           <strong>{t.metadataWarning}</strong
           >{#each selected.warnings as warning}<p>{warning}</p>{/each}
@@ -1224,6 +1433,7 @@
         <pre>{JSON.stringify(selected.raw || {}, null, 2)}</pre>
       </details>
     {/if}
+    </div>{/key}
     {#if selected.collectionIds?.length}<div class="image-collections">
         {#each selected.collectionIds as id}{@const collection =
             collections.find((c) => c.id === id)}{#if collection}<button
@@ -1299,7 +1509,7 @@
     {#if modal === "import"}
       <div
         class="import-dropzone"
-        ondragover={(e) => e.preventDefault()}
+        ondragover={dragOver}
         ondrop={dropped}
         role="region"
         aria-label={t.drop}
@@ -1316,17 +1526,27 @@
           ><Folder size={16} />{t.chooseFolder}</Button
         >
       </div>
-      <p class="import-footnote"><ShieldCheck size={15} />{t.importNotice}</p>
+      <p class="import-footnote">
+        <ShieldCheck size={15} />{t.private}<Hint
+          text={t.importNotice}
+          label={t.moreInfo}
+        />
+      </p>
     {:else if modal === "settings"}
       <div class="settings-block">
         <h3>{t.appearance}</h3>
-        <label
-          >{t.theme}<select bind:value={prefs.theme}
-            ><option value="system">{t.system}</option><option value="light"
-              >{t.light}</option
-            ><option value="dark">{t.dark}</option></select
-          ></label
-        >
+        <div class="setting-row">
+          <span>{t.theme}</span><Select
+            label={t.theme}
+            value={prefs.theme}
+            options={[
+              { value: "system", label: t.system },
+              { value: "light", label: t.light },
+              { value: "dark", label: t.dark },
+            ]}
+            onchange={(next) => (prefs.theme = next)}
+          />
+        </div>
         <div class="palette-block">
           <span>{t.accent}</span>
           <div class="color-options">
@@ -1405,17 +1625,40 @@
             /></label
           >
         </div>
-        <label
-          >{t.language}<select bind:value={prefs.lang}
-            ><option value="en">English</option><option value="zh-TW"
-              >正體中文</option
-            ></select
-          ></label
-        >
+        <div class="setting-row">
+          <span>{t.language}</span><Select
+            label={t.language}
+            value={prefs.lang}
+            options={[
+              { value: "en", label: "English" },
+              { value: "zh-TW", label: "正體中文" },
+            ]}
+            onchange={(next) => (prefs.lang = next)}
+          />
+        </div>
+        <div class="setting-row">
+          <span class="row-with-hint"
+            >{t.previewResolution}<Hint
+              text={t.previewHint}
+              label={t.moreInfo}
+            /></span
+          ><Select
+            label={t.previewResolution}
+            value={prefs.previewResolution}
+            options={[
+              { value: "normal", label: t.previewNormal },
+              { value: "original", label: t.previewOriginal },
+            ]}
+            onchange={(next) => (prefs.previewResolution = next)}
+          />
+        </div>
       </div>
       <div class="settings-block storage-settings">
-        <h3>{t.storage}<span>{bytes(totalBytes)}</span></h3>
-        <p>{t.storageHint}</p>
+        <h3>
+          <span class="row-with-hint"
+            >{t.storage}<Hint text={t.storageHint} label={t.moreInfo} /></span
+          ><span>{bytes(totalBytes)}</span>
+        </h3>
         <Button
           variant="outline"
           onclick={() =>
@@ -1444,8 +1687,20 @@
           <span>{t.shortcutMove}</span><span><kbd>←</kbd> <kbd>→</kbd></span>
         </div>
         <div><span>{t.shortcutSidebar}</span><kbd>[</kbd></div>
+        <div>
+          <span>{t.zoom}</span><Hint text={t.panHint} label={t.moreInfo} />
+        </div>
       </div>
-      <p class="help-privacy"><HardDrive size={16} />{t.storageHint}</p>
+      <div class="help-repository">
+        <a href="https://github.com/AmeMizuki/sparkle" target="_blank" rel="noopener noreferrer">{t.repository}<ArrowUpRight size={16} /></a>
+        <a href="https://github.com/AmeMizuki/sparkle/issues" target="_blank" rel="noopener noreferrer">{t.issueInvite}</a>
+      </div>
+      <p class="help-privacy">
+        <HardDrive size={16} />{t.storage}<Hint
+          text={t.storageHint}
+          label={t.moreInfo}
+        />
+      </p>
     {:else}
       <form onsubmit={saveForm}>
         {#if ["edit", "collection", "manage"].includes(modal)}<label
@@ -1459,12 +1714,7 @@
             />{#if formError}<span id="form-error" class="form-error"
                 >{formError}</span
               >{/if}</label
-          >{#if modal === "edit"}<label class="form-field"
-              >{t.artist}<input
-                bind:value={formArtist}
-                maxlength="1000"
-              /></label
-            >{/if}{/if}
+          >{/if}
         {#if modal === "assign"}<div class="collection-choices">
             {#each collections as collection}<label
                 ><input

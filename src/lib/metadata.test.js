@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { deflateSync } from "node:zlib";
+import { canCompressImage } from "./db.js";
 import {
   extractMetadata,
   normalizeMetadata,
@@ -86,7 +87,6 @@ test("real binary PNG metadata and generator normalization retain prompts, graph
     "A mountain lake, by Claude Monet\nsoft morning light",
   );
   assert.equal(metadata.negative, "blurry, watermark");
-  assert.equal(metadata.artist, "Claude Monet");
   assert.equal(metadata.parameters.cfg, 6.5);
   assert.equal(metadata.parameters.seed, "9007199254740993");
   assert.equal(metadata.parameters.scheduler, "Karras");
@@ -162,7 +162,6 @@ test("real binary PNG metadata and generator normalization retain prompts, graph
     "quiet forest, artist:John Singer Sargent\nsoft natural light",
   );
   assert.equal(comfy.negative, "bad anatomy, watermark");
-  assert.equal(comfy.artist, "John Singer Sargent");
   assert.equal(comfy.parameters.seed, 42);
   assert.equal(comfy.parameters.model, "forest-xl.safetensors");
   assert.equal(comfy.parameters.sampler, "dpmpp_2m");
@@ -225,13 +224,6 @@ test("real binary PNG metadata and generator normalization retain prompts, graph
   assert.equal(novel.positive, "a sea, by Hokusai");
   assert.equal(novel.negative, "low quality");
   assert.equal(novel.parameters.cfg, 5);
-  assert.equal(novel.artist, "Hokusai");
-  assert.equal(
-    normalizeMetadata({
-      prompt: "artist:Claude Monet, artist:Hokusai, by John Singer Sargent",
-    }).artist,
-    "Claude Monet, Hokusai, John Singer Sargent",
-  );
   assert.strictEqual(novel.raw, novelRaw);
   const swarm = normalizeMetadata({
     parameters: JSON.stringify({
@@ -253,7 +245,7 @@ test("real binary PNG metadata and generator normalization retain prompts, graph
   assert.equal(swarm.negative, "text");
   assert.equal(swarm.parameters.model, "cityXL");
   assert.equal(swarm.parameters.cfg, 8);
-  assert.equal(swarm.artist, "Explicit Artist");
+  assert.equal(swarm.raw.Artist, "Explicit Artist");
   assert.equal(
     normalizeMetadata({ sui_image_params: { prompt: "nested", seed: 2 } })
       .source,
@@ -274,4 +266,36 @@ test("real binary PNG metadata and generator normalization retain prompts, graph
   assert.ok(
     truncated.warnings.some((warning) => warning.startsWith("Truncated")),
   );
+});
+
+test("compression accepts static signatures and preserves animation or uncertain containers", async () => {
+  assert.equal(await canCompressImage(new Blob([png([])])), true);
+  const animation = Buffer.alloc(8);
+  animation.writeUInt32BE(2);
+  assert.equal(await canCompressImage(new Blob([png([chunk("acTL", animation)])])), false);
+  assert.equal(await canCompressImage(new Blob([png([]).subarray(0, -1)])), false);
+  // A marker inside ordinary text is not an animation chunk.
+  assert.equal(await canCompressImage(new Blob([png([textChunk("prompt", "acTL ANIM")])])), true);
+  const webp = (chunks) => {
+    const payload = Buffer.concat(chunks.map(([type, data]) => {
+      const size = Buffer.alloc(4);
+      size.writeUInt32LE(data.length);
+      return Buffer.concat([Buffer.from(type), size, data, Buffer.alloc(data.length % 2)]);
+    }));
+    const size = Buffer.alloc(4);
+    size.writeUInt32LE(payload.length + 4);
+    return new Blob([Buffer.from("RIFF"), size, Buffer.from("WEBP"), payload]);
+  };
+  const pixels = ["VP8L", Buffer.from([0x2f, 0, 0, 0, 0])];
+  assert.equal(await canCompressImage(webp([pixels])), true);
+  const extended = Buffer.alloc(10);
+  extended[0] = 0x02;
+  assert.equal(await canCompressImage(webp([["VP8X", extended], pixels])), false);
+  assert.equal(await canCompressImage(webp([["ANIM", Buffer.alloc(6)], pixels])), false);
+  assert.equal(await canCompressImage(webp([pixels, ["ANMF", Buffer.alloc(16)]])), false);
+  assert.equal(await canCompressImage(new Blob([Buffer.from("RIFF\xff\xff\xff\xffWEBP", "latin1")])), false);
+  assert.equal(await canCompressImage(new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0])])), true);
+  assert.equal(await canCompressImage(new Blob(["GIF89a"], { type: "image/png" })), false);
+  assert.equal(await canCompressImage(new Blob(["....ftypavif"])), false);
+  assert.equal(await canCompressImage(new Blob([])), false);
 });

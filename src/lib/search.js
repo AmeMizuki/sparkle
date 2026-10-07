@@ -16,7 +16,7 @@ function near(a, b) {
   return differences + Number(i < a.length || j < b.length) <= 1;
 }
 export function matchesSearch(image, query) {
-  const text = `${image.name} ${image.artist} ${image.date} ${image.source}`
+  const text = `${image.name} ${image.date} ${image.source}`
     .normalize("NFKC")
     .toLocaleLowerCase();
   const terms = query
