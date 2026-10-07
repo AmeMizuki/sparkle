@@ -734,13 +734,13 @@
       onclick={() => navigate("all")}
       ><img
         class="brand-logo"
-        src="/sparkle-logo.png"
+        src={`${import.meta.env.BASE_URL}sparkle-logo.png`}
         alt=""
         width="2172"
         height="724"
       /><img
         class="brand-mark"
-        src="/favicon-32x32.png"
+        src={`${import.meta.env.BASE_URL}favicon-32x32.png`}
         alt=""
         width="32"
         height="32"

@@ -1,18 +1,25 @@
 // Bump this version whenever the production shell, worker, or bundled samples change.
-const CACHE_NAME = "muse-offline-v5";
+const CACHE_NAME = "muse-offline-v6";
 const CACHE_PREFIX = "muse-offline-";
-const MANIFEST_URL = "/samples/manifest.json";
+const BASE_URL = self.registration.scope;
+const BASE_PATH = new URL(BASE_URL).pathname;
+const baseUrl = (path) => new URL(path.replace(/^\/+/, ""), BASE_URL).href;
+const MANIFEST_URL = baseUrl("samples/manifest.json");
 let developmentSession = false;
 
 const isDevelopmentHtml = (html) =>
   /(?:\/@vite\/client|src=["']\/src\/)/.test(html);
 const isDevelopmentUrl = (url) =>
-  /^\/(?:@vite|@id|@fs|src|node_modules)(?:\/|$)/.test(url.pathname);
+  /^\/(?:@vite|@id|@fs|src|node_modules)(?:\/|$)/.test(
+    url.pathname.startsWith(BASE_PATH)
+      ? `/${url.pathname.slice(BASE_PATH.length)}`
+      : url.pathname,
+  );
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
-      const shell = await fetch("/index.html", { cache: "no-store" });
+      const shell = await fetch(baseUrl("index.html"), { cache: "no-store" });
       if (!shell.ok)
         throw new Error("The application shell could not be downloaded.");
       const html = await shell.clone().text();
@@ -20,7 +27,7 @@ self.addEventListener("install", (event) => {
       if (isDevelopmentHtml(html))
         throw new Error("Offline caching is production-only.");
 
-      const assetResponse = await fetch("/asset-manifest.json", {
+      const assetResponse = await fetch(baseUrl("asset-manifest.json"), {
         cache: "no-store",
       });
       if (!assetResponse.ok)
@@ -29,12 +36,12 @@ self.addEventListener("install", (event) => {
         );
       const assets = new Set(
         [
-          "/sparkle-logo.png",
-          "/favicon.ico",
-          "/favicon-32x32.png",
-          "/favicon-16x16.png",
-          "/apple-touch-icon.png",
-        ].map((path) => new URL(path, self.location.origin).href),
+          "sparkle-logo.png",
+          "favicon.ico",
+          "favicon-32x32.png",
+          "favicon-16x16.png",
+          "apple-touch-icon.png",
+        ].map((path) => baseUrl(path)),
       );
       for (const entry of Object.values(await assetResponse.json())) {
         for (const path of [
@@ -42,10 +49,10 @@ self.addEventListener("install", (event) => {
           ...(entry.css || []),
           ...(entry.assets || []),
         ]) {
-          const url = new URL(path, self.location.origin + "/");
+          const url = new URL(path, BASE_URL);
           if (
             url.origin !== self.location.origin ||
-            !url.pathname.startsWith("/assets/")
+            !url.pathname.startsWith(`${BASE_PATH}assets/`)
           )
             throw new Error("Build assets must be bundled locally.");
           assets.add(url.href);
@@ -53,28 +60,34 @@ self.addEventListener("install", (event) => {
       }
 
       const manifestResponse = await fetch(MANIFEST_URL, { cache: "no-store" });
-      if (!manifestResponse.ok)
-        throw new Error("The sample manifest could not be downloaded.");
-      const samples = await manifestResponse.clone().json();
-      if (!Array.isArray(samples))
-        throw new Error("The sample manifest must be an array.");
-      for (const sample of samples) {
-        const url = new URL(sample.file, self.location.origin);
-        if (
-          url.origin !== self.location.origin ||
-          !url.pathname.startsWith("/samples/")
-        ) {
-          throw new Error("Sample assets must be bundled on the same origin.");
+      const hasManifest = manifestResponse.headers
+        .get("content-type")
+        ?.includes("application/json");
+      let samples = [];
+      if (manifestResponse.ok && hasManifest) {
+        samples = await manifestResponse.clone().json();
+        if (!Array.isArray(samples))
+          throw new Error("The sample manifest must be an array.");
+        for (const sample of samples) {
+          const url = new URL(sample.file, BASE_URL);
+          if (
+            url.origin !== self.location.origin ||
+            !url.pathname.startsWith(`${BASE_PATH}samples/`)
+          ) {
+            throw new Error("Sample assets must be bundled on the same origin.");
+          }
+          assets.add(url.href);
         }
-        assets.add(url.href);
+      } else if (!manifestResponse.ok && manifestResponse.status !== 404) {
+        throw new Error("The sample manifest could not be downloaded.");
       }
 
       const cache = await caches.open(CACHE_NAME);
       // addAll rejects installation if any required asset fails; old caches remain usable.
       await cache.addAll([...assets]);
-      await cache.put("/", shell.clone());
-      await cache.put("/index.html", shell);
-      await cache.put(MANIFEST_URL, manifestResponse);
+      await cache.put(baseUrl(""), shell.clone());
+      await cache.put(baseUrl("index.html"), shell);
+      if (hasManifest) await cache.put(MANIFEST_URL, manifestResponse);
       await self.skipWaiting();
     })(),
   );
@@ -104,7 +117,7 @@ self.addEventListener("fetch", (event) => {
     request.method !== "GET" ||
     url.origin !== self.location.origin ||
     !["http:", "https:"].includes(url.protocol) ||
-    url.pathname === "/sw.js" ||
+    url.pathname === `${BASE_PATH}sw.js` ||
     isDevelopmentUrl(url) ||
     developmentSession
   )
@@ -126,15 +139,15 @@ self.addEventListener("fetch", (event) => {
             } else {
               event.waitUntil(
                 Promise.all([
-                  cache.put("/index.html", response.clone()),
-                  cache.put("/", response.clone()),
+                  cache.put(baseUrl("index.html"), response.clone()),
+                  cache.put(baseUrl(""), response.clone()),
                 ]),
               );
             }
           }
           return response;
         } catch (error) {
-          const fallback = await cache.match("/index.html");
+          const fallback = await cache.match(baseUrl("index.html"));
           if (fallback) return fallback;
           throw error;
         }

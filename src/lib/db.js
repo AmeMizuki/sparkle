@@ -159,7 +159,11 @@ export async function seedSamples() {
     await db.settings.put({ key: settingKey, value: true });
     return;
   }
-  const response = await fetch("/samples/manifest.json");
+  const samplesBase = new URL(
+    "samples/",
+    new URL(import.meta.env.BASE_URL, window.location.origin),
+  );
+  const response = await fetch(new URL("manifest.json", samplesBase));
   const hasManifest = response.headers
     .get("content-type")
     ?.includes("application/json");
@@ -178,10 +182,10 @@ export async function seedSamples() {
     throw new Error("Invalid offline sample manifest");
   const records = [];
   const localBlob = async (path) => {
-    const url = new URL(path, window.location.origin);
+    const url = new URL(path.replace(/^\/+/, ""), samplesBase);
     if (
       url.origin !== window.location.origin ||
-      !url.pathname.startsWith("/samples/")
+      !url.pathname.startsWith(samplesBase.pathname)
     )
       throw new Error("Sample files must be bundled locally");
     const result = await fetch(url);
