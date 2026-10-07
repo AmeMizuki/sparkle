@@ -12,7 +12,7 @@
 </p>
 
 <a href="https://github.com/AmeMizuki/sparkle/releases/download/readme-assets/preview-dashboard.mp4">
-  <img src="https://github.com/AmeMizuki/sparkle/releases/download/readme-assets/preview-1.webp" alt="Sparkle Preview" width="100%">
+  <img src="https://github.com/AmeMizuki/sparkle/releases/download/readme-assets/preview-2.webp" alt="Sparkle Preview" width="100%">
 </a>
 
 ## ✨ Features
