@@ -100,13 +100,19 @@ export async function seedSamples() {
     await db.settings.put({ key: settingKey, value: true });
     return;
   }
-  if (!response.ok) {
-    if (response.status === 404) {
-      await db.settings.put({ key: settingKey, value: true });
-      return;
-    }
-    throw new Error("Could not load the offline sample manifest");
+  const response = await fetch("/samples/manifest.json");
+  const hasManifest = response.headers
+    .get("content-type")
+    ?.includes("application/json");
+  if (
+    response.status === 404 ||
+    (response.ok && !hasManifest)
+  ) {
+    await db.settings.put({ key: settingKey, value: true });
+    return;
   }
+  if (!response.ok)
+    throw new Error("Could not load the offline sample manifest");
   const manifest = await response.json();
   const samples = Array.isArray(manifest) ? manifest : manifest.images;
   if (!Array.isArray(samples))
