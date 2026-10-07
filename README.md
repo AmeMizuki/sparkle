@@ -3,12 +3,17 @@
 </p>
 
 <p align="center">
-  A private, offline-first library for images and AI prompts.
+  <a href="README.md">English</a> ·
+  <a href="README.zh-TW.md">繁體中文</a>
 </p>
 
 <p align="center">
-  <img src="https://i.urusai.cc/hfixF.jpg" alt="Sparkle website preview" width="100%">
+  A private, offline-first library for images and AI prompts.
 </p>
+
+<a href="https://github.com/AmeMizuki/sparkle/releases/download/readme-assets/preview-dashboard.mp4">
+  <img src="https://github.com/AmeMizuki/sparkle/releases/download/readme-assets/preview-1.webp" alt="Sparkle Preview" width="100%">
+</a>
 
 ## ✨ Features
 
