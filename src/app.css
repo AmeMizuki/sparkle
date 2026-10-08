@@ -1627,6 +1627,100 @@ kbd {
   margin-bottom: 15px;
   line-height: 1.7;
 }
+.storage-capacity {
+  font-size: 12px;
+  margin: 16px 0;
+}
+.storage-capacity > div,
+.backup-downloads li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0;
+}
+.storage-capacity dd {
+  margin: 0;
+  text-align: right;
+}
+.backup-settings progress {
+  width: 100%;
+  accent-color: var(--primary);
+}
+.storage-meter {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.storage-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+}
+.storage-meter-legend {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin: 4px 0 12px;
+}
+.storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.storage-actions > button {
+  height: 36px;
+  font-size: 13px;
+  line-height: 1;
+  margin: 0;
+}
+.storage-actions > p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.backup-settings {
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+  margin-top: 20px;
+}
+.backup-downloads {
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.backup-downloads a {
+  color: var(--primary);
+  overflow-wrap: anywhere;
+  min-width: 0;
+  text-decoration: underline;
+}
+.backup-downloads span {
+  flex-shrink: 0;
+}
+.import-options {
+  border: 0;
+  padding: 0;
+  margin-top: 24px;
+  font-size: 13px;
+}
+.import-options label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+.import-options input {
+  accent-color: var(--primary);
+}
+.import-options p {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+}
 .shortcuts h3 {
   font-size: 13px;
   font-weight: 500;

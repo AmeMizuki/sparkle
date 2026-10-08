@@ -35,6 +35,23 @@ async function addImage({ blob, thumbnail, ...metadata }) {
   });
 }
 
+export function isQuotaError(error) {
+  const pending = [error];
+  const seen = new Set();
+  while (pending.length) {
+    const current = pending.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    if (current.name === "QuotaExceededError") return true;
+    seen.add(current);
+    pending.push(current.inner, current.cause);
+    if (Array.isArray(current.failures))
+      for (const failure of current.failures) pending.push(failure);
+    else if (current.failuresByPos && typeof current.failuresByPos === "object")
+      for (const failure of Object.values(current.failuresByPos)) pending.push(failure);
+  }
+  return false;
+}
+
 export async function deleteImages(ids) {
   await db.transaction("rw", db.images, db.imageBlobs, async () => {
     await db.images.bulkDelete(ids);
@@ -80,8 +97,26 @@ export async function canCompressImage(blob) {
   const webp =
     text.decode(header.subarray(0, 4)) === "RIFF" &&
     text.decode(header.subarray(8, 12)) === "WEBP";
-  // ponytail: only known static formats; GIF/AVIF stay intact without a frame decoder.
-  if (!png && !webp) return false;
+  if (!png && !webp) {
+    if (typeof ImageDecoder === "undefined") return false;
+    const signature = text.decode(header);
+    const type = /^GIF8[79]a/.test(signature) ? "image/gif"
+      : signature.slice(4, 8) === "ftyp" && ["avif", "avis"].includes(signature.slice(8, 12))
+        ? "image/avif" : blob.type;
+    let decoder;
+    try {
+      if (!type || !(await ImageDecoder.isTypeSupported(type))) return false;
+      const data = await blob.arrayBuffer();
+      decoder = new ImageDecoder({ data, type, preferAnimation: true, transfer: [data] });
+      await decoder.tracks.ready;
+      await decoder.completed;
+      return decoder.tracks.selectedTrack?.frameCount === 1;
+    } catch {
+      return false;
+    } finally {
+      decoder?.close();
+    }
+  }
   const end = png ? blob.size : new DataView(header.buffer).getUint32(4, true) + 8;
   if (end > blob.size || end < (png ? 8 : 12)) return false;
   let offset = png ? 8 : 12;
@@ -116,6 +151,8 @@ function encodeCanvas(canvas, type = "image/webp") {
 }
 
 async function imageData(blob, compress = false) {
+  if (compress && !(await canCompressImage(blob)))
+    throw new Error("This image format may be animated or is unsupported for conversion. Use original mode to import it.");
   let image;
   try {
     image = await decodeImage(blob);
@@ -132,38 +169,39 @@ async function imageData(blob, compress = false) {
     const thumbnail = await encodeCanvas(canvas).catch(() =>
       encodeCanvas(canvas, "image/png").catch(() => blob),
     );
-    let stored = blob;
-    if (compress && thumbnail !== blob) {
-      try {
-        if (await canCompressImage(blob)) {
-          canvas.width = width;
-          canvas.height = height;
-          context.drawImage(image, 0, 0, width, height);
-          const encoded = await encodeCanvas(canvas);
-          if (encoded.type === "image/webp" && encoded.size < blob.size)
-            stored = encoded;
-        }
-      } catch {
-        // Encoder/canvas limits must not prevent importing the original.
-      }
-    }
-    return { width, height, thumbnail, blob: stored };
+    if (!compress) return { width, height, thumbnail, blob };
+    const storedRatio = Math.min(1, 2048 / Math.max(width, height));
+    canvas.width = Math.max(1, Math.round(width * storedRatio));
+    canvas.height = Math.max(1, Math.round(height * storedRatio));
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const stored = await encodeCanvas(canvas);
+    if (stored.type !== "image/webp")
+      throw new Error("WebP encoding is unavailable in this browser. Use original mode to import it.");
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      originalWidth: width,
+      originalHeight: height,
+      thumbnail,
+      blob: stored,
+    };
   } finally {
     image?.close?.();
   }
 }
 
-export async function importFiles(files, onProgress = () => {}) {
+export async function importFiles(files, onProgress = () => {}, { preserveOriginal = true } = {}) {
   const batch = Array.from(files);
   let imported = 0;
   const errors = [];
+  let quotaExceeded = false;
   onProgress({ done: 0, total: batch.length });
   const { extractMetadata } = await import("./metadata.js");
   for (let index = 0; index < batch.length; index++) {
     const file = batch[index];
     try {
       const metadata = await extractMetadata(file);
-      const dimensions = await imageData(file, true);
+      const dimensions = await imageData(file, !preserveOriginal);
       const originalName = file.name || "Untitled image";
       const modified = Number.isFinite(file.lastModified)
         ? file.lastModified
@@ -175,6 +213,8 @@ export async function importFiles(files, onProgress = () => {}) {
         size: dimensions.blob.size,
         originalSize: file.size,
         originalName,
+        originalWidth: dimensions.originalWidth ?? dimensions.width,
+        originalHeight: dimensions.originalHeight ?? dimensions.height,
         downloadName: dimensions.blob === file
           ? originalName
           : `${originalName.replace(/\.[^.]+$/, "")}.webp`,
@@ -188,12 +228,14 @@ export async function importFiles(files, onProgress = () => {}) {
       imported++;
     } catch (error) {
       errors.push(
-        `${file.name || "Untitled image"}: ${error.message || "Unable to import image"}`,
+        `${file.name || "Untitled image"}: ${error?.message || "Unable to import image"}`,
       );
+      if (isQuotaError(error)) quotaExceeded = true;
     }
     onProgress({ done: index + 1, total: batch.length });
+    if (quotaExceeded) break;
   }
-  return { imported, errors };
+  return { imported, errors, quotaExceeded, notImported: batch.length - imported };
 }
 
 export async function seedSamples() {

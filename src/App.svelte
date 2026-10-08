@@ -43,7 +43,7 @@
   import { ContextMenu } from "bits-ui";
   import Select from "$lib/components/ui/select/select.svelte";
   import Hint from "$lib/components/ui/hint/hint.svelte";
-  import { db, loadImages, importFiles, seedSamples, deleteImages, deleteAllImages, createId } from "./lib/db.js";
+  import { db, loadImages, importFiles, seedSamples, deleteImages, deleteAllImages, createId, isQuotaError } from "./lib/db.js";
   import { lazyImage } from "./lib/lazy-image.js";
   import { confirmationCharacter } from "./lib/confirmation.js";
   import { en, zh } from "./lib/i18n.js";
@@ -55,6 +55,14 @@
   let loading = $state(true),
     busy = $state(false),
     progress = $state({ done: 0, total: 0 });
+  let storageEstimate = $state(null),
+    pendingFiles = $state.raw([]),
+    preserveOriginal = $state(true),
+    importSummary = $state(""),
+    exporting = $state(false),
+    backupProgress = $state({ done: 0, total: 0 }),
+    backupParts = $state.raw([]),
+    backupState = $state("");
   let view = $state("all"),
     selectedId = $state(null),
     detailId = $state(null),
@@ -270,10 +278,14 @@
     detailId ? filtered.findIndex((i) => i.id === detailId) : -1,
   );
   function bytes(n) {
-    return n < 1048576
-      ? `${(n / 1024).toFixed(0)} KB`
-      : `${(n / 1048576).toFixed(1)} MB`;
+    if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} GB`;
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
+    return `${(n / 1000).toFixed(1)} KB`;
   }
+  const usagePct = $derived(
+    storageEstimate ? (storageEstimate.usage / storageEstimate.quota) * 100 : 0,
+  );
+  const pctLabel = (p) => (p > 0 && p < 0.01 ? "<0.01%" : `${p.toFixed(p < 1 ? 2 : 1)}%`);
   function dateLabel(date) {
     return new Date(date).toLocaleDateString(
       prefs.lang === "zh-TW" ? "zh-TW" : "en-US",
@@ -283,6 +295,7 @@
   function openModal(kind) {
     restoreFocus = document.activeElement;
     modal = kind;
+    if (kind === "help") void refreshStorage();
     formError = "";
     error = "";
     deletionCode = "";
@@ -298,6 +311,9 @@
   }
   function closeModal() {
     modalOpen = false;
+    pendingFiles = [];
+    if (fileInput) fileInput.value = "";
+    if (folderInput) folderInput.value = "";
     restoreFocus?.focus?.();
   }
   $effect(() => {
@@ -400,13 +416,16 @@
       collections = nextCollections;
     };
     await (animate ? listChange(commit) : commit());
+    await refreshStorage();
   }
   async function action(fn) {
     error = "";
     try {
       await fn();
     } catch (e) {
-      error = `${t.error} ${e.message || ""}`;
+      imageError(e);
+    } finally {
+      await refreshStorage();
     }
   }
   async function patch(image, changes) {
@@ -428,24 +447,40 @@
     setTimeout(() => popId === image.id && (popId = null), 300);
     await action(() => patch(image, { favorite: !image.favorite }));
   }
-  async function importImages(files) {
-    if (busy) return;
+  function importImages(files) {
+    if (busy || exporting || !files?.length) return;
+    pendingFiles = Array.from(files);
+    preserveOriginal = true;
+    openModal("importOptions");
+  }
+  async function beginImport() {
+    if (busy || exporting || !pendingFiles.length) return;
+    const files = pendingFiles;
     busy = true;
     progress = { done: 0, total: files.length };
     importErrors = [];
+    importSummary = "";
     error = "";
     closeModal();
     try {
       const result = await importFiles(
-        Array.from(files),
+        files,
         (p) => (progress = p),
+        { preserveOriginal },
       );
       importErrors = result.errors;
-      notify(
-        result.imported === 1
-          ? t.importOneSuccess
-          : t.importSuccess.replace("{count}", result.imported),
-      );
+      if (result.notImported) {
+        importSummary = t.importPartial
+          .replace("{imported}", result.imported)
+          .replace("{failed}", result.notImported);
+        if (result.quotaExceeded) importSummary = `${t.quotaError} ${t.importStopped} ${importSummary}`;
+      } else {
+        notify(
+          result.imported === 1
+            ? t.importOneSuccess
+            : t.importSuccess.replace("{count}", result.imported),
+        );
+      }
       await refresh({
         animate: true,
         before: () => {
@@ -454,9 +489,10 @@
         },
       });
     } catch (e) {
-      error = `${t.error} ${e.message || ""}`;
+      imageError(e);
     } finally {
       busy = false;
+      await refreshStorage();
       if (fileInput) fileInput.value = "";
       if (folderInput) folderInput.value = "";
     }
@@ -655,7 +691,43 @@
     if (event.key === "[") toggleSidebar();
   }
   function imageError(e) {
-    error = `${t.error} ${e.message || ""}`;
+    error = isQuotaError(e) ? t.quotaError : `${t.error} ${e.message || ""}`;
+  }
+  async function refreshStorage() {
+    try {
+      const estimate = await navigator.storage?.estimate?.();
+      storageEstimate = estimate && Number.isFinite(estimate.usage) &&
+        Number.isFinite(estimate.quota) && estimate.quota > 0 ? estimate : null;
+    } catch {
+      storageEstimate = null;
+    }
+  }
+  async function backupLibrary() {
+    if (busy || exporting || loading || deletingAll) return;
+    for (const part of backupParts) URL.revokeObjectURL(part.url);
+    backupParts = [];
+    backupState = "";
+    error = "";
+    exporting = true;
+    backupProgress = { done: 0, total: 0 };
+    try {
+      const { exportBackup } = await import("./lib/backup.js");
+      await exportBackup({
+        preferences: JSON.parse(JSON.stringify(prefs)),
+        onProgress: (p) => (backupProgress = p),
+        onPart: ({ blob, name }) => {
+          backupParts = [...backupParts, {
+            name, size: blob.size, url: URL.createObjectURL(blob),
+          }];
+        },
+      });
+      backupState = t.backupReady.replace("{count}", backupParts.length);
+    } catch (e) {
+      backupState = t.backupIncomplete;
+      imageError(e);
+    } finally {
+      exporting = false;
+    }
   }
   async function protectStorage() {
     try {
@@ -702,12 +774,16 @@
     root.lang = prefs.lang;
     for (const [name, value] of Object.entries(surface))
       root.style.setProperty(name, value);
-    localStorage.setItem("muse-preferences", JSON.stringify(prefs));
-    // index.html replays this before first paint so a dark or tinted library never flashes.
-    localStorage.setItem(
-      "muse-surface",
-      JSON.stringify({ dark: isDark, ...surface }),
-    );
+    try {
+      localStorage.setItem("muse-preferences", JSON.stringify(prefs));
+      // index.html replays this before first paint.
+      localStorage.setItem(
+        "muse-surface",
+        JSON.stringify({ dark: isDark, ...surface }),
+      );
+    } catch (e) {
+      imageError(e);
+    }
   });
   $effect(() => {
     query;
@@ -740,6 +816,8 @@
     narrow.addEventListener("change", onNarrow);
     route(false);
     window.addEventListener("hashchange", onHash);
+    window.addEventListener("focus", refreshStorage);
+    const capacityTimer = setInterval(refreshStorage, 30000);
     action(async () => {
       await protectStorage();
       await seedSamples();
@@ -749,6 +827,9 @@
       dark.removeEventListener("change", onDark);
       narrow.removeEventListener("change", onNarrow);
       window.removeEventListener("hashchange", onHash);
+      window.removeEventListener("focus", refreshStorage);
+      clearInterval(capacityTimer);
+      for (const part of backupParts) URL.revokeObjectURL(part.url);
       clearTimeout(toastTimer);
     };
   });
@@ -925,15 +1006,18 @@
             onclick={() => (error = "")}><X size={16} /></button
           >
         </div>{/if}
-      {#if importErrors.length}<div class="error-banner" role="alert">
-          <details>
+      {#if importSummary || importErrors.length}<div class="error-banner" role="alert">
+          <div>
+          {#if importSummary}<p>{importSummary}</p>{/if}
+          {#if importErrors.length}<details>
             <summary>{t.importErrors} ({importErrors.length})</summary
             >{#each importErrors as issue}<p>{issue}</p>{/each}
-          </details>
+          </details>{/if}
+          </div>
           <button
             class="small-icon"
             aria-label={t.dismiss}
-            onclick={() => (importErrors = [])}><X size={16} /></button
+            onclick={() => { importErrors = []; importSummary = ""; }}><X size={16} /></button
           >
         </div>{/if}
       {#if busy}<div class="import-progress" role="status">
@@ -1148,10 +1232,10 @@
             <button
               class="small-icon"
               aria-label={t.dismiss}
-              onclick={() => {
+              onclick={() => action(() => {
                 sampleBanner = false;
                 localStorage.setItem("muse-hide-samples", "true");
-              }}><X size={16} /></button
+              })}><X size={16} /></button
             >
           </div>{/if}
         <div
@@ -1532,7 +1616,7 @@
     >
     <Dialog.Header
       ><Dialog.Title
-        >{modal === "import"
+        >{["import", "importOptions"].includes(modal)
           ? t.uploadTitle
           : modal === "collection"
             ? t.newCollection
@@ -1554,7 +1638,9 @@
                           ? t.settings
                           : t.help}</Dialog.Title
       ><Dialog.Description
-        >{modal === "import"
+        >{modal === "importOptions"
+          ? t.importOptionsHint.replace("{count}", pendingFiles.length)
+          : modal === "import"
           ? t.uploadHint
           : modal === "collection"
             ? t.collectionHint
@@ -1604,6 +1690,17 @@
           label={t.moreInfo}
         />
       </p>
+    {:else if modal === "importOptions"}
+      <fieldset class="import-options">
+        <legend>{t.preserveResolution}</legend>
+        <label><input type="radio" name="import-resolution" bind:group={preserveOriginal} value={true} />{t.keepOriginal}</label>
+        <label><input type="radio" name="import-resolution" bind:group={preserveOriginal} value={false} />{t.compressWebp}</label>
+        <p>{t.compressHint}</p>
+      </fieldset>
+      <div class="form-actions">
+        <Button variant="outline" onclick={closeModal}>{t.cancel}</Button>
+        <Button onclick={beginImport} disabled={busy || exporting}>{t.import}</Button>
+      </div>
     {:else if modal === "settings"}
       <div class="settings-block">
         <h3>{t.appearance}</h3>
@@ -1726,30 +1823,25 @@
         </div>
       </div>
       <div class="settings-block storage-settings">
-        <h3>
-          <span class="row-with-hint"
-            >{t.storage}<Hint text={t.storageHint} label={t.moreInfo} /></span
-          ><span>{bytes(totalBytes)}</span>
-        </h3>
-        <Button
-          variant="outline"
-          onclick={() =>
-            action(async () => {
-              await protectStorage();
-              notify(protectedStorage ? t.persistent : t.persistDenied);
-            })}
-          ><ShieldCheck size={16} />{protectedStorage
-            ? t.persistent
-            : t.persist}</Button
-        >{#if persistFailed}<p role="status">
-            {t.persistDenied}
-          </p>{/if}{#if images.some((i) => i.sample)}<button
+        {#if images.some((i) => i.sample)}<button
             class="remove-button"
             onclick={() => openModal("samples")}>{t.deleteSamples}</button
           >{/if}
         <Button variant="destructive" disabled={busy || loading || deletingAll || !images.length}
           onclick={() => openModal("deleteAll")}
           ><Trash2 size={15} />{t.deleteAllImages}</Button>
+        <section class="backup-settings">
+          <h3>{t.backupTitle}</h3>
+          <p>{t.backupHint}</p>
+          <Button variant="outline" onclick={backupLibrary} disabled={busy || exporting || loading || deletingAll}>
+            <Download size={16} />{exporting ? t.backingUp : t.backupTitle}
+          </Button>
+          <p role="status">{exporting ? `${t.backingUp} ${backupProgress.done} / ${backupProgress.total}` : backupState}</p>
+          {#if exporting}<progress value={backupProgress.done} max={backupProgress.total || 1} aria-label={t.backingUp}></progress>{/if}
+          {#if backupParts.length}<ul class="backup-downloads">
+            {#each backupParts as part}<li><a href={part.url} download={part.name}>{part.name}</a><span>{bytes(part.size)}</span></li>{/each}
+          </ul>{/if}
+        </section>
       </div>
     {:else if modal === "help"}
       <div class="shortcuts">
@@ -1768,12 +1860,49 @@
         <a href="https://github.com/AmeMizuki/sparkle" target="_blank" rel="noopener noreferrer">{t.repository}<ArrowUpRight size={16} /></a>
         <a href="https://github.com/AmeMizuki/sparkle/issues" target="_blank" rel="noopener noreferrer">{t.issueInvite}</a>
       </div>
-      <p class="help-privacy">
-        <HardDrive size={16} />{t.storage}<Hint
-          text={t.storageHint}
-          label={t.moreInfo}
-        />
-      </p>
+      <div class="settings-block storage-settings">
+        <h3>
+          <span class="row-with-hint"
+            >{t.storage}<Hint text={t.storageHint} label={t.moreInfo} /></span>
+        </h3>
+        <dl class="storage-capacity">
+          <div><dt>{t.storageUsed}</dt><dd>{storageEstimate ? `${bytes(storageEstimate.usage)} (${pctLabel(usagePct)})` : t.estimateUnavailable}</dd></div>
+          <div><dt>{t.storageQuota}</dt><dd>{storageEstimate ? bytes(storageEstimate.quota) : t.estimateUnavailable}</dd></div>
+          <div><dt>{t.storageFree}</dt><dd>{storageEstimate ? bytes(Math.max(0, storageEstimate.quota - storageEstimate.usage)) : t.estimateUnavailable}</dd></div>
+          <div><dt>{t.imageStorage}</dt><dd>{bytes(totalBytes)}</dd></div>
+        </dl>
+        {#if storageEstimate}<div
+            class="storage-meter"
+            role="meter"
+            aria-label={t.storageUsed}
+            aria-valuemin="0"
+            aria-valuemax={storageEstimate.quota}
+            aria-valuenow={Math.min(storageEstimate.usage, storageEstimate.quota)}
+            aria-valuetext={`${bytes(storageEstimate.usage)} / ${bytes(storageEstimate.quota)}`}
+          >
+            <span style:width={`max(${Math.min(usagePct, 100)}%, 3px)`}></span>
+          </div>
+          <div class="storage-meter-legend" aria-hidden="true">
+            <span>0</span><span>{bytes(storageEstimate.quota)}</span>
+          </div>{/if}
+        <p>{t.storageEstimateHint}</p>
+        <div class="storage-actions">
+        <Button variant="outline" onclick={refreshStorage}>{t.refreshCapacity}</Button>
+        <Button
+          variant="outline"
+          onclick={() =>
+            action(async () => {
+              await protectStorage();
+              notify(protectedStorage ? t.persistent : t.persistDenied);
+            })}
+          ><ShieldCheck size={16} />{protectedStorage
+            ? t.persistent
+            : t.persist}</Button
+        >{#if persistFailed}<p role="status">
+            {t.persistDenied}
+          </p>{/if}
+        </div>
+      </div>
     {:else}
       <form onsubmit={saveForm}>
         {#if modal === "deleteAllCode"}
