@@ -68,7 +68,15 @@ export async function deleteAllImages(code, input) {
   });
 }
 
-export const loadImages = () => db.images.orderBy("date").reverse().toArray();
+export async function loadImages() {
+  const images = await db.images.orderBy("date").reverse().toArray();
+  if (images.some((image) => !Array.isArray(image.loras))) {
+    const { normalizeMetadata } = await import("./metadata.js");
+    for (const image of images)
+      image.loras ??= normalizeMetadata({ positive: image.positive, negative: image.negative, ...image.raw }).loras;
+  }
+  return images;
+}
 
 async function decodeImage(blob) {
   try {

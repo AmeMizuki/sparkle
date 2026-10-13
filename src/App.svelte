@@ -1550,7 +1550,7 @@
     {#if full || infoTab === "details"}
       <section class="parameters">
         <h3>{t.generation}</h3>
-        {#if Object.keys(selected.parameters || {}).length}<dl>
+        {#if Object.keys(selected.parameters || {}).length || selected.loras?.length}<dl>
             {#each Object.entries(selected.parameters || {}) as [key, value]}<div
               >
                 <dt>
@@ -1562,6 +1562,27 @@
                     : String(value)}
                 </dd>
               </div>{/each}
+            {#if selected.loras?.length}
+              <div class="lora-parameter">
+                <dt>{t.loras} <span>({selected.loras.length})</span></dt>
+                <dd>
+                  <ul class="lora-list">
+                    {#each selected.loras as lora}
+                      <li>
+                        <span class="lora-name">{lora.name}</span>
+                        {#if lora.strength !== undefined || lora.strengthClip !== undefined || lora.hash}
+                          <div class="lora-values">
+                            {#if lora.strength !== undefined}<span>{t.loraStrength}: <b>{lora.strength}</b></span>{/if}
+                            {#if lora.strengthClip !== undefined}<span>{t.loraStrengthClip}: <b>{lora.strengthClip}</b></span>{/if}
+                            {#if lora.hash}<span>{t.loraHash}: <b>{lora.hash}</b></span>{/if}
+                          </div>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                </dd>
+              </div>
+            {/if}
           </dl>{:else}<p class="muted">{t.noMetadata}</p>{/if}
       </section>
       <div class="file-details">

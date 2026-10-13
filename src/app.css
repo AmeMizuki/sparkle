@@ -1031,6 +1031,41 @@ kbd {
 .parameters dl > div:has(dd):nth-child(n + 6) {
   grid-column: 1/-1;
 }
+.parameters .lora-parameter {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.lora-list {
+  list-style: none;
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.lora-list li {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+}
+.lora-name {
+  display: block;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+.lora-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+.lora-values b {
+  color: var(--foreground);
+  font-weight: 500;
+}
 .parameters > p {
   font-size: 12px;
   margin-top: 10px;

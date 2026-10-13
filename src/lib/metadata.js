@@ -298,6 +298,17 @@ function splitSettings(text) {
   return pairs;
 }
 
+function lorasFromText(text) {
+  const loras = [];
+  for (const match of text.matchAll(/<lora:([^<>]+):([^:<>]+)>/gi)) {
+    const name = match[1].trim();
+    const weight = match[2].trim();
+    if (name && weight && Number.isFinite(Number(weight)))
+      loras.push({ name, strength: Number(weight) });
+  }
+  return loras;
+}
+
 export function parseA1111(text) {
   const settingsStart = /(?:^|\n)\s*Steps:\s*\d+/g.exec(text);
   if (!settingsStart) return null;
@@ -323,6 +334,22 @@ export function parseA1111(text) {
     parameters.width = Number(size[1]);
     parameters.height = Number(size[2]);
   }
+  const loras = lorasFromText(prompt);
+  const hashField = Object.entries(fields).find(([name]) => key(name) === "lorahashes");
+  if (hashField) {
+    const [field, hashes] = hashField;
+    delete parameters[field];
+    for (const entry of hashes.split(",")) {
+      const separator = entry.lastIndexOf(":");
+      if (separator < 1) continue;
+      const name = entry.slice(0, separator).trim();
+      const hash = entry.slice(separator + 1).trim();
+      if (!name || !hash) continue;
+      const matches = loras.filter((lora) => lora.name === name);
+      if (matches.length) matches.forEach((lora) => (lora.hash = hash));
+      else loras.push({ name, hash });
+    }
+  }
   return {
     source: "Automatic1111",
     positive: (negativeStart
@@ -333,6 +360,7 @@ export function parseA1111(text) {
       ? prompt.slice(negativeStart.index + negativeStart[0].length).trim()
       : "",
     parameters,
+    loras,
   };
 }
 
@@ -418,6 +446,7 @@ export function parseComfyGraph(graph) {
   );
   const negative = texts(inputs.negative ?? guider.negative);
   const parameters = { ...parametersFrom(guider), ...parametersFrom(inputs) };
+  const loras = [];
   // Follow only the selected sampler's ancestry, not disconnected editor nodes.
   if (sampler) {
     walk(
@@ -426,6 +455,14 @@ export function parseComfyGraph(graph) {
         const fields = node.inputs || {};
         if (/CheckpointLoader|UNETLoader/i.test(node.class_type))
           parameters.model ||= fields.ckpt_name || fields.unet_name;
+        if (/LoraLoader/i.test(node.class_type) && typeof fields.lora_name === "string" && fields.lora_name.trim()) {
+          const lora = { name: fields.lora_name.trim() };
+          for (const [input, output] of [["strength_model", "strength"], ["strength_clip", "strengthClip"]]) {
+            if (typeof fields[input] === "number" && Number.isFinite(fields[input]))
+              lora[output] = fields[input];
+          }
+          loras.push(lora);
+        }
         if (/SamplerSelect/i.test(node.class_type))
           parameters.sampler ||= fields.sampler_name;
         if (/Scheduler|Noise/i.test(node.class_type))
@@ -447,7 +484,7 @@ export function parseComfyGraph(graph) {
       });
     }
   }
-  return { source: "ComfyUI", positive, negative, parameters };
+  return { source: "ComfyUI", positive, negative, parameters, loras };
 }
 
 export function normalizeMetadata(raw = {}, warnings = []) {
@@ -463,6 +500,8 @@ export function normalizeMetadata(raw = {}, warnings = []) {
   const swarm = [["metadata", raw], ...documents].find(isSwarm);
   if (swarm) {
     const fields = swarm[1].sui_image_params || swarm[1];
+    const names = Array.isArray(fields.loras) ? fields.loras : typeof fields.loras === "string" ? fields.loras.split(",") : [];
+    const weights = Array.isArray(fields.loraweights) ? fields.loraweights : typeof fields.loraweights === "string" ? fields.loraweights.split(",") : [];
     normalized = {
       source: "SwarmUI",
       positive: fields.prompt || fields.positive || "",
@@ -472,6 +511,14 @@ export function normalizeMetadata(raw = {}, warnings = []) {
         fields.negative ||
         "",
       parameters: parametersFrom(fields),
+      loras: names.flatMap((name, index) => {
+        if (typeof name !== "string" || !name.trim()) return [];
+        const lora = { name: name.trim() };
+        const weight = weights[index];
+        if (["string", "number"].includes(typeof weight) && String(weight).trim() && Number.isFinite(Number(weight)))
+          lora.strength = Number(weight);
+        return [lora];
+      }),
     };
   }
   if (!normalized) {
@@ -538,6 +585,8 @@ export function normalizeMetadata(raw = {}, warnings = []) {
     typeof normalized.positive === "string" ? normalized.positive : "";
   normalized.negative =
     typeof normalized.negative === "string" ? normalized.negative : "";
+  if (!normalized.loras?.length)
+    normalized.loras = lorasFromText(`${normalized.positive}\n${normalized.negative}`);
   for (const [name, value] of entries) {
     if (
       ["prompt", "comment", "usercomment", "swarmprompt"].includes(key(name)) &&
@@ -583,6 +632,7 @@ export async function extractMetadata(blob) {
       positive: "",
       negative: "",
       parameters: {},
+      loras: [],
       raw,
       warnings: [...warnings, `Metadata normalization: ${error.message}`],
     };
