@@ -44,6 +44,8 @@
   import Select from "$lib/components/ui/select/select.svelte";
   import Hint from "$lib/components/ui/hint/hint.svelte";
   import { db, loadImages, importFiles, seedSamples, deleteImages, deleteAllImages, createId, isQuotaError } from "./lib/db.js";
+  import { inspectImage, saveInspectedImage } from "./lib/db.js";
+  import { imageFromUrl } from "./lib/image-url.js";
   import { lazyImage } from "./lib/lazy-image.js";
   import { confirmationCharacter } from "./lib/confirmation.js";
   import { en, zh } from "./lib/i18n.js";
@@ -97,6 +99,13 @@
     folderInput = $state(),
     searchInput = $state(),
     restoreFocus;
+  let inspectInput = $state(),
+    inspected = $state.raw(null),
+    inspectionUrl = $state(""),
+    imageUrl = $state(""),
+    inspecting = $state(false),
+    savingInspection = $state(false),
+    inspectionController;
   let heroId = $state(null),
     intro = $state(true),
     cardNames = $state(false),
@@ -321,7 +330,76 @@
       deletionCode = "";
       deletionDigits = ["", "", "", "", "", ""];
     }
+    if (!modalOpen || modal !== "inspect") {
+      inspectionController?.abort();
+      inspected = null;
+      inspecting = false;
+      imageUrl = "";
+      if (inspectInput) inspectInput.value = "";
+    }
   });
+  $effect(() => {
+    const url = inspected ? URL.createObjectURL(inspected.blob) : "";
+    inspectionUrl = url;
+    return () => { if (url) URL.revokeObjectURL(url); };
+  });
+  async function inspect(source) {
+    if (!source || savingInspection || busy || exporting) return;
+    if (!modalOpen || modal !== "inspect") openModal("inspect");
+    inspectionController?.abort();
+    const controller = new AbortController();
+    inspectionController = controller;
+    inspected = null;
+    inspecting = true;
+    preserveOriginal = true;
+    error = "";
+    try {
+      const file = typeof source === "string"
+        ? await imageFromUrl(source, controller.signal)
+        : source;
+      const result = await inspectImage(file);
+      if (!controller.signal.aborted) inspected = result;
+    } catch (e) {
+      if (!controller.signal.aborted)
+        error = t[e.message] || `${t.inspectFailed} ${e.message || ""}`;
+    } finally {
+      if (!controller.signal.aborted) inspecting = false;
+      if (inspectInput) inspectInput.value = "";
+    }
+  }
+  function pasted(event) {
+    if (savingInspection || busy || exporting || (modalOpen && modal !== "inspect")) return;
+    const file = [...(event.clipboardData?.files || [])].find((file) => file.type.startsWith("image/"));
+    if (file) {
+      event.preventDefault();
+      void inspect(file);
+    } else if (!event.target.closest?.("input,textarea,select,[contenteditable]")) {
+      const text = event.clipboardData?.getData("text/plain").trim();
+      if (/^https?:\/\//i.test(text || "")) {
+        event.preventDefault();
+        void inspect(text);
+      }
+    }
+  }
+  async function storeInspection() {
+    if (!inspected || savingInspection || inspecting || busy || exporting) return;
+    savingInspection = true;
+    error = "";
+    try {
+      await saveInspectedImage(inspected, { preserveOriginal });
+      closeModal();
+      notify(t.importOneSuccess);
+      await refresh({
+        animate: true,
+        before: () => { navigate("all", false); clearFilters(); },
+      });
+      await refreshStorage();
+    } catch (e) {
+      imageError(e);
+    } finally {
+      savingInspection = false;
+    }
+  }
   function navigate(next, animate = true) {
     mobileNav = false;
     if (animate && next === view && !detailId) return;
@@ -835,7 +913,7 @@
   });
 </script>
 
-<svelte:window onkeydown={keydown} ondragstart={(event) => {
+<svelte:window onkeydown={keydown} onpaste={pasted} ondragstart={(event) => {
   if (event.target.closest?.(".app-shell") && event.target.closest?.("img,a"))
     event.preventDefault();
 }} />
@@ -849,6 +927,8 @@
 <a class="skip-link" href="#main"
   >{prefs.lang === "en" ? "Skip to content" : "跳至主要內容"}</a
 >
+<input class="hidden" type="file" accept="image/*" bind:this={inspectInput}
+  onchange={(e) => inspect(e.target.files?.[0])} aria-label={t.inspectChoose} />
 <input
   class="hidden"
   type="file"
@@ -1094,7 +1174,7 @@
             </ContextMenu.Root>
             <aside class="detail-info">
               {#key selected.id}<div class="info-swap">
-                  {@render imageInfo(true)}
+                  {@render imageInfo(true, selected)}
                 </div>{/key}
             </aside>
           </div>
@@ -1129,7 +1209,9 @@
                 aria-label={t.manage}
                 onclick={() => openModal("manage")}
                 ><Ellipsis size={19} /></button
-              >{/if}<Button
+              >{/if}<Button variant="outline" onclick={() => openModal("inspect")} disabled={busy || exporting}>
+              <Search size={17} />{t.inspect}
+            </Button><Button
               class="import-button"
               onclick={() => openModal("import")}
               disabled={busy}><Plus size={17} />{t.import}</Button
@@ -1406,7 +1488,7 @@
       </ContextMenu.Root>
       <div class="inspector-content">
         {#key selected.id}<div class="info-swap">
-            {@render imageInfo(false)}
+            {@render imageInfo(false, selected)}
           </div>{/key}
       </div>
     </aside>{/if}
@@ -1452,7 +1534,7 @@
   </ContextMenu.Portal>
 {/snippet}
 
-{#snippet imageInfo(full)}
+{#snippet imageInfo(full, selected, transient = false)}
   {#if selected}
     <div class="info-title">
       {#if full}
@@ -1460,17 +1542,20 @@
       {:else}
         <h2>{selected.name}</h2>
       {/if}
+      {#if !transient}
       <button
         class="icon-button"
         aria-label={t.rename}
         onclick={() => openModal("edit")}><Pencil size={16} /></button
       >
+      {/if}
     </div>
     <div class="info-meta-strip">
       <span class="source-tag">{selected.source}</span><span
         >{selected.width} × {selected.height}</span
       ><span>{bytes(selected.size)}</span>
     </div>
+    {#if !transient}
     <div class="info-actions">
       <Button variant="outline" onclick={() => toggleFavorite(selected)}
         ><Heart
@@ -1491,6 +1576,7 @@
         title={t.download}><Download size={17} /></a
       >
     </div>
+    {/if}
     {#if selected.sample}<div class="sample-disclaimer">
         <Sparkles size={14} /><span>{t.sample}</span><Hint
           text={t.sampleInfo}
@@ -1507,7 +1593,7 @@
         >
       </div>{/if}
     {#key full ? "full" : infoTab}<div class="tab-swap">
-    {#if full || infoTab === "details"}
+    {#if !transient && (full || infoTab === "details")}
       <div class="preview-resolution">
         <span class="row-with-hint"
           >{t.previewResolution}<Hint
@@ -1583,7 +1669,7 @@
                 </dd>
               </div>
             {/if}
-          </dl>{:else}<p class="muted">{t.noMetadata}</p>{/if}
+          </dl>{:else}<p class="muted">{transient ? t.inspectNoMetadata : t.noMetadata}</p>{/if}
       </section>
       <div class="file-details">
         <span>{t.date}</span><time datetime={selected.date}
@@ -1615,6 +1701,7 @@
               }}><Folder size={13} />{collection.name}</button
             >{/if}{/each}
       </div>{/if}
+    {#if !transient}
     {#if !full}<Button
         variant="outline"
         class="full-view-button"
@@ -1624,20 +1711,24 @@
     <button class="remove-button" onclick={() => openModal("delete")}
       ><Trash2 size={15} />{t.remove}</button
     >
+    {/if}
   {/if}
 {/snippet}
 
 <Dialog.Root bind:open={modalOpen}>
-  <Dialog.Content class="app-dialog" showCloseButton={false}>
+  <Dialog.Content class={`app-dialog${modal === "inspect" ? " inspect-dialog" : ""}`} showCloseButton={false}
+    onEscapeKeydown={(e) => { if (savingInspection) e.preventDefault(); }}
+    onInteractOutside={(e) => { if (savingInspection) e.preventDefault(); }}>
     <button
       class="dialog-close icon-button"
       aria-label={t.close}
-      disabled={deletingAll}
+      disabled={deletingAll || savingInspection}
       onclick={closeModal}><X size={18} /></button
     >
     <Dialog.Header
       ><Dialog.Title
-        >{["import", "importOptions"].includes(modal)
+        >{modal === "inspect" ? t.inspect
+          : ["import", "importOptions"].includes(modal)
           ? t.uploadTitle
           : modal === "collection"
             ? t.newCollection
@@ -1659,7 +1750,8 @@
                           ? t.settings
                           : t.help}</Dialog.Title
       ><Dialog.Description
-        >{modal === "importOptions"
+        >{modal === "inspect" ? t.inspectHint
+          : modal === "importOptions"
           ? t.importOptionsHint.replace("{count}", pendingFiles.length)
           : modal === "import"
           ? t.uploadHint
@@ -1685,7 +1777,41 @@
       ></Dialog.Header
     >
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-    {#if modal === "import"}
+    {#if modal === "inspect"}
+      <div class="inspect-inputs">
+        <Button variant="outline" onclick={() => inspectInput.click()} disabled={savingInspection}>
+          <Upload size={16} />{t.inspectChoose}
+        </Button>
+        <span class="muted">{t.inspectPaste}</span>
+      </div>
+      <form class="inspect-url" onsubmit={(e) => { e.preventDefault(); void inspect(imageUrl); }}>
+        <label class="form-field" for="inspect-url">{t.imageUrl}
+          <input id="inspect-url" type="url" required placeholder="https://…" bind:value={imageUrl}
+            disabled={savingInspection} aria-describedby="inspect-url-hint" />
+        </label>
+        <Button type="submit" disabled={!imageUrl.trim() || savingInspection}>{t.inspectLoad}</Button>
+      </form>
+      <p id="inspect-url-hint" class="muted inspect-hint">{t.inspectUrlHint}</p>
+      {#if inspecting}<p role="status">{t.inspectLoading}</p>
+      {:else if inspected}
+        <div class="inspection-preview">
+          <div class="inspection-image"><img src={inspectionUrl || undefined} alt={inspected.name} /></div>
+          <div class="inspection-info">{@render imageInfo(true, inspected, true)}</div>
+        </div>
+        <fieldset class="import-options" disabled={savingInspection}>
+          <legend>{t.preserveResolution}</legend>
+          <label><input type="radio" name="inspect-resolution" bind:group={preserveOriginal} value={true} />{t.keepOriginal}</label>
+          <label><input type="radio" name="inspect-resolution" bind:group={preserveOriginal} value={false} />{t.compressWebp}</label>
+          <p>{t.compressHint}</p>
+        </fieldset>
+      {/if}
+      <div class="form-actions">
+        <Button variant="outline" onclick={closeModal} disabled={savingInspection}>{t.close}</Button>
+        <Button onclick={storeInspection} disabled={!inspected || inspecting || savingInspection || busy || exporting}>
+          {savingInspection ? t.importing : t.saveInspection}
+        </Button>
+      </div>
+    {:else if modal === "import"}
       <div
         class="import-dropzone"
         ondragover={dragOver}

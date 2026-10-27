@@ -198,41 +198,56 @@ async function imageData(blob, compress = false) {
   }
 }
 
+export async function inspectImage(file, { preserveOriginal = true } = {}) {
+  const { extractMetadata } = await import("./metadata.js");
+  const metadata = await extractMetadata(file);
+  const dimensions = await imageData(file, !preserveOriginal);
+  const originalName = file.name || "Untitled image";
+  const modified = Number.isFinite(file.lastModified) ? file.lastModified : Date.now();
+  return {
+    id: createId(),
+    name: originalName,
+    ...dimensions,
+    size: dimensions.blob.size,
+    storedType: dimensions.blob.type,
+    originalSize: file.size,
+    originalName,
+    originalWidth: dimensions.originalWidth ?? dimensions.width,
+    originalHeight: dimensions.originalHeight ?? dimensions.height,
+    downloadName: dimensions.blob === file
+      ? originalName
+      : `${originalName.replace(/\.[^.]+$/, "")}.webp`,
+    date: new Date(modified).toISOString(),
+    ...metadata,
+    favorite: false,
+    collectionIds: [],
+    sample: false,
+  };
+}
+
+export async function saveInspectedImage(image, { preserveOriginal = true } = {}) {
+  const dimensions = preserveOriginal ? {} : await imageData(image.blob, true);
+  await addImage({
+    ...image,
+    ...dimensions,
+    size: dimensions.blob?.size ?? image.size,
+    downloadName: preserveOriginal
+      ? image.downloadName
+      : `${image.originalName.replace(/\.[^.]+$/, "")}.webp`,
+    importedAt: new Date().toISOString(),
+  });
+}
+
 export async function importFiles(files, onProgress = () => {}, { preserveOriginal = true } = {}) {
   const batch = Array.from(files);
   let imported = 0;
   const errors = [];
   let quotaExceeded = false;
   onProgress({ done: 0, total: batch.length });
-  const { extractMetadata } = await import("./metadata.js");
   for (let index = 0; index < batch.length; index++) {
     const file = batch[index];
     try {
-      const metadata = await extractMetadata(file);
-      const dimensions = await imageData(file, !preserveOriginal);
-      const originalName = file.name || "Untitled image";
-      const modified = Number.isFinite(file.lastModified)
-        ? file.lastModified
-        : Date.now();
-      await addImage({
-        id: createId(),
-        name: originalName,
-        ...dimensions,
-        size: dimensions.blob.size,
-        originalSize: file.size,
-        originalName,
-        originalWidth: dimensions.originalWidth ?? dimensions.width,
-        originalHeight: dimensions.originalHeight ?? dimensions.height,
-        downloadName: dimensions.blob === file
-          ? originalName
-          : `${originalName.replace(/\.[^.]+$/, "")}.webp`,
-        date: new Date(modified).toISOString(),
-        importedAt: new Date().toISOString(),
-        ...metadata,
-        favorite: false,
-        collectionIds: [],
-        sample: false,
-      });
+      await saveInspectedImage(await inspectImage(file, { preserveOriginal }));
       imported++;
     } catch (error) {
       errors.push(

@@ -1,5 +1,5 @@
 // Bump this version whenever the production shell, worker, or bundled samples change.
-const CACHE_NAME = "muse-offline-v6";
+const CACHE_NAME = "muse-offline-v7";
 const CACHE_PREFIX = "muse-offline-";
 const BASE_URL = self.registration.scope;
 const BASE_PATH = new URL(BASE_URL).pathname;
@@ -115,6 +115,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (
     request.method !== "GET" ||
+    request.cache === "no-store" ||
     url.origin !== self.location.origin ||
     !["http:", "https:"].includes(url.protocol) ||
     url.pathname === `${BASE_PATH}sw.js` ||

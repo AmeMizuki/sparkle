@@ -20,6 +20,7 @@
 - **Keep your library local.** Images and thumbnails stay in browser storage; imported files are never uploaded.
 - **Browse and organize.** Import files or nested folders, mark favorites, and group images into collections.
 - **Inspect generations.** View positive and negative prompts, generation settings, original metadata, and zoomable full-size images.
+- **Inspect before saving.** Choose a file, paste an image, or read a direct image URL to preview prompts and metadata. Nothing enters the library until you choose “Save to library”.
 - **Find images quickly.** Search filenames, generator names, and ISO dates; filter by source or date and sort results. Longer search terms tolerate a one-character typo.
 - **Personalize the workspace.** Choose English or Traditional Chinese, system/light/dark appearance, and accent and background colors. Settings persist and apply before first paint.
 - **Stay focused.** The sidebar collapses to an icon rail (top-left button or `[` key), and becomes a slide-in drawer on phones. Motion respects `prefers-reduced-motion` and browser support.
@@ -32,6 +33,14 @@
 Reads PNG `tEXt`, `zTXt`, `iTXt`; JPEG EXIF/XMP/comments; and WebP EXIF/XMP. Normalizes Automatic1111 generation text, ComfyUI prompt graphs (including custom samplers), NovelAI comments, and SwarmUI JSON. Original metadata is preserved; extraction warnings are nonfatal.
 
 Custom nodes or stripped metadata may leave fields unknown. For ComfyUI graphs with multiple output branches, Sparkle uses the nearest connected sampler and keeps raw graph data available. Dates use the source file's last-modified timestamp, not a claimed generation timestamp.
+
+## Inspect before saving
+
+Open **Inspect image** in the library, choose an image file, paste an image with `Ctrl / ⌘ + V`, or enter a direct image URL and select **Read image**. Preview the image, positive/negative prompts, generation settings, LoRAs, dimensions, file size and raw metadata, and copy prompts. Outside text fields, pasting an image URL also opens inspection.
+
+Previews stay in memory and are discarded on close, without adding anything to the library. To keep an image, choose original or WebP storage and select **Save to library**. Existing batch and folder imports are unchanged.
+
+URLs must be direct HTTP/HTTPS image links without embedded login credentials. Requests go directly to the source, without a proxy or website login credentials, with a 30-second timeout. The source must allow CORS; for webpage links or blocked sources, download the original and choose the file instead. Screenshots, clipboard re-encoding and websites stripping metadata may leave no prompt. Inspection reads embedded data only; it does not infer or reconstruct prompts.
 
 ## Develop
 

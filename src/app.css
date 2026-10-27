@@ -1382,6 +1382,86 @@ kbd {
   right: 10px;
   top: 10px;
 }
+.app-dialog.inspect-dialog {
+  max-width: 1000px !important;
+}
+.inspect-dialog > * {
+  min-width: 0;
+}
+.inspect-inputs,
+.inspect-url {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.inspect-inputs,
+.inspect-hint {
+  font-size: 12px;
+  line-height: 1.7;
+}
+.inspect-url {
+  align-items: end;
+}
+.inspect-url .form-field {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.inspect-url input {
+  width: 100%;
+  min-width: 0;
+}
+.inspect-url > button {
+  flex-shrink: 0;
+}
+.inspection-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.inspection-image {
+  position: sticky;
+  top: 0;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  background: var(--background);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.inspection-image img {
+  max-width: 100%;
+  max-height: 55dvh;
+  object-fit: contain;
+}
+.inspection-info {
+  min-width: 0;
+}
+.inspection-info .info-title h1 {
+  font-size: 20px;
+  overflow-wrap: anywhere;
+}
+.inspection-info .raw-metadata pre {
+  max-height: 260px;
+  overflow: auto;
+}
+@media (max-width: 767px) {
+  .inspection-preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .inspection-image {
+    position: static;
+  }
+  .inspection-image img {
+    max-height: 35dvh;
+  }
+  .inspect-inputs,
+  .heading-actions {
+    flex-wrap: wrap;
+  }
+}
+
 .import-dropzone {
   border: 1px dashed color-mix(in srgb, var(--primary) 35%, var(--border));
   background: var(--background);
